@@ -13,10 +13,13 @@ const ACCESS_ID = process.env.TUYA_ACCESS_ID;
 const ACCESS_SECRET = process.env.TUYA_ACCESS_SECRET;
 
 const CUSTOM_DEVICES = [
-  { id: '710151318cce4e127075', name: 'Interruptor Sala', room: 'Sala' },
+  { id: '710151318cce4e127075', name: 'Interruptor Sala',   room: 'Sala'    },
   { id: '5702238434ab95013d64', name: 'Interruptor Fundos', room: 'Externa' },
-  { id: '7808227470039f392d0a', name: 'Interruptor Sala 2', room: 'Sala' },
+  { id: '7808227470039f392d0a', name: 'Interruptor Sala 2', room: 'Sala'    },
 ];
+
+let cachedToken = null;
+let tokenExpiry  = 0;
 
 function hmac(str) {
   return crypto.createHmac('sha256', ACCESS_SECRET).update(str).digest('hex').toUpperCase();
@@ -24,22 +27,28 @@ function hmac(str) {
 function sha256(str) {
   return crypto.createHash('sha256').update(str || '').digest('hex');
 }
+
 async function getToken() {
+  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
   const t = Date.now().toString();
-  const s = ACCESS_ID + t + '' + ['GET', sha256(''), '', '/v1.0/token?grant_type=1'].join('\n');
+  const s = ACCESS_ID + t + ['GET', sha256(''), '', '/v1.0/token?grant_type=1'].join('\n');
   const res = await axios.get(`${BASE_URL}/v1.0/token?grant_type=1`, {
     headers: { client_id: ACCESS_ID, sign: hmac(s), t, sign_method: 'HMAC-SHA256', nonce: '' },
   });
   if (!res.data.success) throw new Error(JSON.stringify(res.data));
-  return res.data.result.access_token;
+  cachedToken = res.data.result.access_token;
+  tokenExpiry  = Date.now() + (res.data.result.expire_time * 1000) - 60000;
+  return cachedToken;
 }
+
 async function tuyaRequest(method, path, body = null) {
   const token = await getToken();
   const t = Date.now().toString();
   const [urlPath, query] = path.split('?');
   const sortedQuery = query ? '?' + query.split('&').sort().join('&') : '';
   const bodyStr = body ? JSON.stringify(body) : '';
-  const s = ACCESS_ID + token + t + '' + [method, sha256(bodyStr), '', urlPath + sortedQuery].join('\n');
+  const s = ACCESS_ID + token + t + [method, sha256(bodyStr), '', urlPath + sortedQuery].join('\n');
+  const t0 = Date.now();
   const res = await axios({
     method, url: `${BASE_URL}${path}`,
     headers: {
@@ -48,6 +57,7 @@ async function tuyaRequest(method, path, body = null) {
     },
     data: body || undefined,
   });
+  console.log(`${method} ${path} — ${Date.now() - t0}ms`);
   return res.data;
 }
 
@@ -67,11 +77,9 @@ app.get('/devices', async (req, res) => {
         }
       })
     );
-
     const data = await tuyaRequest('GET', '/v1.3/iot-03/devices?source_type=tuyaUser&source_id=az1673988732280coKKP&size=50');
     const tuyaList = (data?.result?.list || []).filter(d => !CUSTOM_DEVICES.find(c => c.id === d.id));
-    const list = [...statusResults, ...tuyaList];
-    res.json({ result: { list }, success: true });
+    res.json({ result: { list: [...statusResults, ...tuyaList] }, success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
