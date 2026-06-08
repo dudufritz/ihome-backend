@@ -38,6 +38,19 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Tabela de agendamentos (rotinas criadas pelo assistente IA)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_schedules (
+      id SERIAL PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      on_time TEXT,
+      off_time TEXT,
+      active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
   console.log('✅ Banco de dados iniciado!');
 }
 initDB().catch(err => console.error('❌ Erro ao iniciar banco:', err));
@@ -266,6 +279,165 @@ app.get('/devices/:id/status', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── AGENDAMENTOS ─────────────────────────────────────────────
+
+app.get('/schedules', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_schedules WHERE user_email = $1 AND active = true ORDER BY created_at DESC',
+      [req.user.email]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/schedules/:id', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM user_schedules WHERE id = $1 AND user_email = $2',
+      [req.params.id, req.user.email]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── ASSISTENTE IA (Gemini) ────────────────────────────────────
+
+app.post('/ai-command', authMiddleware, async (req, res) => {
+  try {
+    const { command } = req.body;
+    if (!command) return res.status(400).json({ error: 'Comando não fornecido.' });
+
+    const devResult = await pool.query(
+      'SELECT * FROM user_devices WHERE user_email = $1',
+      [req.user.email]
+    );
+    const devices = devResult.rows;
+
+    if (devices.length === 0) {
+      return res.json({ message: 'Você não tem dispositivos cadastrados ainda. Adicione seus dispositivos em Configurações.' });
+    }
+
+    const deviceList = devices.map(d =>
+      `- Nome: "${d.name}", ID: ${d.tuya_id}, Cômodo: ${d.room || 'não definido'}`
+    ).join('\n');
+
+    const prompt = `Você é o assistente de automação residencial iHome. Interprete o comando do usuário e retorne APENAS um JSON válido.
+
+Dispositivos disponíveis:
+${deviceList}
+
+Ações possíveis:
+
+1. Controlar um dispositivo:
+{"action":"control","deviceId":"ID_EXATO","deviceName":"NOME","state":true,"message":"Mensagem amigável"}
+
+2. Controlar todos os dispositivos:
+{"action":"control_all","state":true,"message":"Mensagem amigável"}
+
+3. Criar agendamento (rotina):
+{"action":"schedule","deviceId":"ID_EXATO","deviceName":"NOME","onTime":"HH:MM","offTime":"HH:MM","message":"Mensagem amigável"}
+(onTime e offTime são opcionais — inclua apenas os que o usuário mencionou)
+
+4. Listar dispositivos:
+{"action":"list","message":"Descreva os dispositivos disponíveis aqui"}
+
+5. Não entendeu:
+{"action":"unknown","message":"Explicação do que não entendeu e como o usuário pode reformular"}
+
+Regras importantes:
+- state true = ligar, false = desligar
+- Use SEMPRE o ID exato da lista de dispositivos
+- Responda SOMENTE com o JSON, sem texto extra, sem markdown, sem \`\`\`
+
+Comando do usuário: "${command}"`;
+
+    const geminiRes = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1 }
+      }
+    );
+
+    const rawText = geminiRes.data.candidates[0].content.parts[0].text.trim();
+    const jsonText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(jsonText);
+
+    if (parsed.action === 'control') {
+      const config = await getUserTuya(req.user.email);
+      await tuyaRequest(
+        'POST', `/v1.0/iot-03/devices/${parsed.deviceId}/commands`,
+        config.tuya_access_id, config.tuya_secret, config.tuya_base_url,
+        { commands: [{ code: 'switch_1', value: parsed.state }] }
+      );
+      return res.json({ message: parsed.message });
+    }
+
+    if (parsed.action === 'control_all') {
+      const config = await getUserTuya(req.user.email);
+      await Promise.all(devices.map(d =>
+        tuyaRequest(
+          'POST', `/v1.0/iot-03/devices/${d.tuya_id}/commands`,
+          config.tuya_access_id, config.tuya_secret, config.tuya_base_url,
+          { commands: [{ code: 'switch_1', value: parsed.state }] }
+        ).catch(() => {})
+      ));
+      return res.json({ message: parsed.message });
+    }
+
+    if (parsed.action === 'schedule') {
+      await pool.query(
+        'INSERT INTO user_schedules (user_email, device_id, device_name, on_time, off_time) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.email, parsed.deviceId, parsed.deviceName, parsed.onTime || null, parsed.offTime || null]
+      );
+      return res.json({ message: parsed.message });
+    }
+
+    return res.json({ message: parsed.message });
+
+  } catch (err) {
+    console.error('AI error:', err.message);
+    res.status(500).json({ error: 'Erro ao processar: ' + err.message });
+  }
+});
+
+// ── CRON: EXECUTAR AGENDAMENTOS A CADA MINUTO ────────────────
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const currentTime = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+    const result = await pool.query(
+      `SELECT s.*, c.tuya_access_id, c.tuya_secret, c.tuya_base_url
+       FROM user_schedules s
+       JOIN user_tuya_config c ON s.user_email = c.user_email
+       WHERE s.active = true`
+    );
+    for (const s of result.rows) {
+      if (s.on_time === currentTime) {
+        await tuyaRequest('POST', `/v1.0/iot-03/devices/${s.device_id}/commands`,
+          s.tuya_access_id, s.tuya_secret, s.tuya_base_url,
+          { commands: [{ code: 'switch_1', value: true }] }
+        ).catch(e => console.error(`Agendamento ON erro:`, e.message));
+        console.log(`⏰ Ligou: ${s.device_name}`);
+      }
+      if (s.off_time === currentTime) {
+        await tuyaRequest('POST', `/v1.0/iot-03/devices/${s.device_id}/commands`,
+          s.tuya_access_id, s.tuya_secret, s.tuya_base_url,
+          { commands: [{ code: 'switch_1', value: false }] }
+        ).catch(e => console.error(`Agendamento OFF erro:`, e.message));
+        console.log(`⏰ Desligou: ${s.device_name}`);
+      }
+    }
+  } catch (err) {
+    console.error('Cron erro:', err.message);
+  }
+}, 60000);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🏠 iHome API rodando em http://localhost:${PORT}`));
