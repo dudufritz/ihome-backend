@@ -51,6 +51,29 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Tabela de alertas reais
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_alerts (
+      id SERIAL PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      read BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  // Cache do último status conhecido de cada dispositivo
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_status_cache (
+      user_email TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      online BOOLEAN DEFAULT false,
+      updated_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (user_email, device_id)
+    )
+  `);
   console.log('✅ Banco de dados iniciado!');
 }
 initDB().catch(err => console.error('❌ Erro ao iniciar banco:', err));
@@ -279,6 +302,111 @@ app.get('/devices/:id/status', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── ALERTAS ──────────────────────────────────────────────────
+
+app.get('/alerts', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_alerts WHERE user_email = $1 ORDER BY created_at DESC LIMIT 50',
+      [req.user.email]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/alerts/read-all', authMiddleware, async (req, res) => {
+  try {
+    await pool.query('UPDATE user_alerts SET read = true WHERE user_email = $1', [req.user.email]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/alerts', authMiddleware, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM user_alerts WHERE user_email = $1', [req.user.email]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POLLING: MONITORAR DISPOSITIVOS A CADA 5 MIN ─────────────
+async function monitorDevices() {
+  try {
+    const usersResult = await pool.query(
+      'SELECT DISTINCT ud.user_email FROM user_devices ud JOIN user_tuya_config utc ON ud.user_email = utc.user_email'
+    );
+    for (const { user_email } of usersResult.rows) {
+      try {
+        const config = await getUserTuya(user_email);
+        const { tuya_access_id: ID, tuya_secret: SECRET, tuya_base_url: BASE } = config;
+        const devResult = await pool.query('SELECT * FROM user_devices WHERE user_email = $1', [user_email]);
+
+        for (const device of devResult.rows) {
+          try {
+            const s = await tuyaRequest('GET', `/v1.0/iot-03/devices/${device.tuya_id}/status`, ID, SECRET, BASE);
+            const statusMap = {};
+            (s?.result || []).forEach(item => { statusMap[item.code] = item.value; });
+            const isOnline = true;
+
+            // Verifica cache anterior
+            const cache = await pool.query(
+              'SELECT online FROM device_status_cache WHERE user_email = $1 AND device_id = $2',
+              [user_email, device.tuya_id]
+            );
+
+            if (cache.rows.length > 0) {
+              const wasOnline = cache.rows[0].online;
+              if (!wasOnline && isOnline) {
+                await pool.query(
+                  'INSERT INTO user_alerts (user_email, device_id, device_name, type, message) VALUES ($1, $2, $3, $4, $5)',
+                  [user_email, device.tuya_id, device.name, 'online', `${device.name} voltou a ficar online.`]
+                );
+              }
+            }
+
+            // Atualiza cache
+            await pool.query(
+              `INSERT INTO device_status_cache (user_email, device_id, online, updated_at)
+               VALUES ($1, $2, $3, NOW())
+               ON CONFLICT (user_email, device_id) DO UPDATE SET online = $3, updated_at = NOW()`,
+              [user_email, device.tuya_id, isOnline]
+            );
+          } catch {
+            // Dispositivo offline
+            const cache = await pool.query(
+              'SELECT online FROM device_status_cache WHERE user_email = $1 AND device_id = $2',
+              [user_email, device.tuya_id]
+            );
+            if (cache.rows.length === 0 || cache.rows[0].online === true) {
+              await pool.query(
+                'INSERT INTO user_alerts (user_email, device_id, device_name, type, message) VALUES ($1, $2, $3, $4, $5)',
+                [user_email, device.tuya_id, device.name, 'offline', `${device.name} ficou offline.`]
+              );
+              await pool.query(
+                `INSERT INTO device_status_cache (user_email, device_id, online, updated_at)
+                 VALUES ($1, $2, false, NOW())
+                 ON CONFLICT (user_email, device_id) DO UPDATE SET online = false, updated_at = NOW()`,
+                [user_email, device.tuya_id]
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Monitor erro para ${user_email}:`, e.message);
+      }
+    }
+  } catch (err) {
+    console.error('Monitor geral erro:', err.message);
+  }
+}
+
+setInterval(monitorDevices, 5 * 60 * 1000); // a cada 5 minutos
 
 // ── AGENDAMENTOS ─────────────────────────────────────────────
 
