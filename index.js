@@ -118,7 +118,10 @@ app.use(express.json());
 
 // ── BANCO DE DADOS ───────────────────────────────────────────
 // O Pool é a "conexão" com o banco de dados PostgreSQL
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 // Cria as tabelas automaticamente quando o servidor inicia
 async function initDB() {
@@ -958,4 +961,9 @@ setInterval(async () => {
 }, 60000);
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🏠 iHome API rodando em http://localhost:${PORT}`));
+
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`🏠 iHome API rodando em http://localhost:${PORT}`));
+}
+
+module.exports = { app, pool };
