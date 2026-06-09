@@ -963,6 +963,7 @@ setInterval(async () => {
 
 const PORT = process.env.PORT || 3001;
 
+/* istanbul ignore next */
 if (require.main === module) {
   app.listen(PORT, () => console.log(`🏠 iHome API rodando em http://localhost:${PORT}`));
 }
