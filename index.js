@@ -5,6 +5,16 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const webpush = require('web-push');
+
+// Configura VAPID para notificações push
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    process.env.VAPID_EMAIL || 'mailto:admin@ihomeauto.com',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
 
 const app = express();
 app.use(cors());
@@ -72,6 +82,15 @@ async function initDB() {
       online BOOLEAN DEFAULT false,
       updated_at TIMESTAMP DEFAULT NOW(),
       PRIMARY KEY (user_email, device_id)
+    )
+  `);
+  // Assinaturas de push notification por usuário
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      subscription JSONB NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
     )
   `);
   console.log('✅ Banco de dados iniciado!');
@@ -303,6 +322,67 @@ app.get('/devices/:id/status', authMiddleware, async (req, res) => {
   }
 });
 
+// ── PUSH NOTIFICATIONS ───────────────────────────────────────
+
+app.get('/vapid-public-key', (req, res) => {
+  res.json({ key: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+app.post('/push-subscribe', authMiddleware, async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    // Remove assinatura antiga deste dispositivo se já existir
+    await pool.query(
+      "DELETE FROM push_subscriptions WHERE user_email = $1 AND subscription->>'endpoint' = $2",
+      [req.user.email, subscription.endpoint]
+    );
+    await pool.query(
+      'INSERT INTO push_subscriptions (user_email, subscription) VALUES ($1, $2)',
+      [req.user.email, JSON.stringify(subscription)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/push-subscribe', authMiddleware, async (req, res) => {
+  try {
+    const { endpoint } = req.body;
+    await pool.query(
+      "DELETE FROM push_subscriptions WHERE user_email = $1 AND subscription->>'endpoint' = $2",
+      [req.user.email, endpoint]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function sendPushToUser(userEmail, title, body) {
+  try {
+    const subs = await pool.query(
+      'SELECT subscription FROM push_subscriptions WHERE user_email = $1',
+      [userEmail]
+    );
+    for (const row of subs.rows) {
+      try {
+        await webpush.sendNotification(row.subscription, JSON.stringify({ title, body, icon: '/logo192.png' }));
+      } catch (e) {
+        // Remove assinatura inválida
+        if (e.statusCode === 410) {
+          await pool.query(
+            "DELETE FROM push_subscriptions WHERE user_email = $1 AND subscription->>'endpoint' = $2",
+            [userEmail, row.subscription.endpoint]
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Push error:', err.message);
+  }
+}
+
 // ── ALERTAS ──────────────────────────────────────────────────
 
 app.get('/alerts', authMiddleware, async (req, res) => {
@@ -367,6 +447,7 @@ async function monitorDevices() {
                   'INSERT INTO user_alerts (user_email, device_id, device_name, type, message) VALUES ($1, $2, $3, $4, $5)',
                   [user_email, device.tuya_id, device.name, 'online', `${device.name} voltou a ficar online.`]
                 );
+                await sendPushToUser(user_email, '✅ Dispositivo online', `${device.name} voltou a ficar online.`);
               }
             }
 
@@ -388,6 +469,7 @@ async function monitorDevices() {
                 'INSERT INTO user_alerts (user_email, device_id, device_name, type, message) VALUES ($1, $2, $3, $4, $5)',
                 [user_email, device.tuya_id, device.name, 'offline', `${device.name} ficou offline.`]
               );
+              await sendPushToUser(user_email, '⚠️ Dispositivo offline', `${device.name} ficou offline.`);
               await pool.query(
                 `INSERT INTO device_status_cache (user_email, device_id, online, updated_at)
                  VALUES ($1, $2, false, NOW())
