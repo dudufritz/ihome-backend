@@ -93,6 +93,17 @@ async function initDB() {
       PRIMARY KEY (user_email, device_id)
     )
   `);
+  // Compartilhamento de casa entre usuários
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS home_shares (
+      id SERIAL PRIMARY KEY,
+      owner_email TEXT NOT NULL,
+      guest_email TEXT NOT NULL,
+      permission TEXT NOT NULL DEFAULT 'control',
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(owner_email, guest_email)
+    )
+  `);
   // Assinaturas de push notification por usuário
   await pool.query(`
     CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -161,11 +172,21 @@ app.post('/tuya-credentials', authMiddleware, async (req, res) => {
 // Lista os dispositivos cadastrados pelo usuário
 app.get('/my-devices', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM user_devices WHERE user_email = $1 ORDER BY created_at',
+    // Dispositivos próprios
+    const own = await pool.query(
+      "SELECT *, user_email as owner_email, 'own' as access_type FROM user_devices WHERE user_email = $1 ORDER BY created_at",
       [req.user.email]
     );
-    res.json(result.rows);
+    // Dispositivos de casas compartilhadas comigo
+    const shared = await pool.query(
+      `SELECT ud.*, ud.user_email as owner_email, 'shared' as access_type, hs.permission
+       FROM home_shares hs
+       JOIN user_devices ud ON ud.user_email = hs.owner_email
+       WHERE hs.guest_email = $1
+       ORDER BY ud.created_at`,
+      [req.user.email]
+    );
+    res.json([...own.rows, ...shared.rows]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -186,6 +207,69 @@ app.post('/my-devices', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── COMPARTILHAMENTO DE CASA ─────────────────────────────────
+
+// Lista quem tem acesso à minha casa
+app.get('/shares', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM home_shares WHERE owner_email = $1 ORDER BY created_at DESC',
+      [req.user.email]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Lista casas que foram compartilhadas comigo
+app.get('/shared-with-me', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT hs.*, COUNT(ud.id)::int as device_count FROM home_shares hs LEFT JOIN user_devices ud ON ud.user_email = hs.owner_email WHERE hs.guest_email = $1 GROUP BY hs.id ORDER BY hs.created_at DESC',
+      [req.user.email]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Convidar alguém para minha casa
+app.post('/shares', authMiddleware, async (req, res) => {
+  const { guest_email, permission = 'control' } = req.body;
+  if (!guest_email) return res.status(400).json({ error: 'E-mail do convidado é obrigatório' });
+  if (guest_email === req.user.email) return res.status(400).json({ error: 'Você não pode convidar a si mesmo' });
+  try {
+    const result = await pool.query(
+      `INSERT INTO home_shares (owner_email, guest_email, permission)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (owner_email, guest_email) DO UPDATE SET permission = $3
+       RETURNING *`,
+      [req.user.email, guest_email, permission]
+    );
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Remover acesso de alguém
+app.delete('/shares/:id', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM home_shares WHERE id = $1 AND owner_email = $2',
+      [req.params.id, req.user.email]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Sair de uma casa compartilhada (convidado remove a si mesmo)
+app.delete('/shared-with-me/:id', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM home_shares WHERE id = $1 AND guest_email = $2',
+      [req.params.id, req.user.email]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Descobre todos os dispositivos da conta Tuya do usuário
@@ -340,8 +424,19 @@ app.get('/devices', authMiddleware, async (req, res) => {
 // Envia um comando para um dispositivo (ex: ligar/desligar)
 app.post('/devices/:id/command', authMiddleware, async (req, res) => {
   try {
-    const config = await getUserTuya(req.user.email);
-    const { commands } = req.body;
+    const { commands, owner_email } = req.body;
+    // Se owner_email foi enviado (dispositivo de casa compartilhada), verifica permissão
+    let resolvedEmail = req.user.email;
+    if (owner_email && owner_email !== req.user.email) {
+      const share = await pool.query(
+        "SELECT permission FROM home_shares WHERE owner_email = $1 AND guest_email = $2",
+        [owner_email, req.user.email]
+      );
+      if (share.rows.length === 0) return res.status(403).json({ error: 'Acesso negado' });
+      if (share.rows[0].permission !== 'control') return res.status(403).json({ error: 'Você tem apenas permissão de visualização' });
+      resolvedEmail = owner_email;
+    }
+    const config = await getUserTuya(resolvedEmail);
     const data = await tuyaRequest(
       'POST',
       `/v1.0/iot-03/devices/${req.params.id}/commands`,
