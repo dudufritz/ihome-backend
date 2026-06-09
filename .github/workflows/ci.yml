@@ -8,33 +8,19 @@ on:
 
 jobs:
   test:
-    name: Testes e Lint
+    name: Testes e Análise
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ihome_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ihome_test
+      NODE_ENV: test
       SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
       SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
-      NODE_ENV: test
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -45,14 +31,14 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
-      - name: Rodar testes
-        run: npm test -- --coverage --forceExit
+      - name: Rodar testes com cobertura
+        run: npm test
 
-      - name: Upload cobertura para SonarCloud
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: coverage/
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   deploy:
     name: Deploy Railway
