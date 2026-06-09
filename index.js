@@ -8,12 +8,21 @@ const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
 
 // Configura VAPID para notificações push
-if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(
-    process.env.VAPID_EMAIL || 'mailto:admin@ihomeauto.com',
-    process.env.VAPID_PUBLIC_KEY,
-    process.env.VAPID_PRIVATE_KEY
-  );
+let pushReady = false;
+try {
+  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(
+      process.env.VAPID_EMAIL || 'mailto:admin@ihomeauto.com',
+      process.env.VAPID_PUBLIC_KEY,
+      process.env.VAPID_PRIVATE_KEY
+    );
+    pushReady = true;
+    console.log('✅ Web Push configurado com VAPID.');
+  } else {
+    console.warn('⚠️ VAPID keys não encontradas — push notifications desativadas.');
+  }
+} catch (e) {
+  console.error('❌ Erro ao configurar VAPID:', e.message);
 }
 
 const app = express();
@@ -324,8 +333,10 @@ app.get('/devices/:id/status', authMiddleware, async (req, res) => {
 
 // ── PUSH NOTIFICATIONS ───────────────────────────────────────
 
+app.get('/health', (req, res) => res.json({ ok: true, push: pushReady }));
+
 app.get('/vapid-public-key', (req, res) => {
-  res.json({ key: process.env.VAPID_PUBLIC_KEY || '' });
+  res.json({ key: pushReady ? (process.env.VAPID_PUBLIC_KEY || '') : '' });
 });
 
 app.post('/push-subscribe', authMiddleware, async (req, res) => {
