@@ -9,9 +9,12 @@ const jwksClient = require('jwks-rsa');
 const webpush = require('web-push');
 const nodemailer = require('nodemailer');
 
-// Configuração do transporte de e-mail (Gmail)
+// Configuração do transporte de e-mail (Gmail, forçando IPv4)
 const mailTransport = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  family: 4,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD
