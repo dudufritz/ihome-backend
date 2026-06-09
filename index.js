@@ -188,6 +188,44 @@ app.post('/my-devices', authMiddleware, async (req, res) => {
   }
 });
 
+// Descobre todos os dispositivos da conta Tuya do usuário
+app.get('/discover-devices', authMiddleware, async (req, res) => {
+  try {
+    const config = await getUserTuya(req.user.email);
+    const { tuya_access_id: ID, tuya_secret: SECRET, tuya_base_url: BASE } = config;
+
+    // Busca todos os dispositivos no projeto Tuya (paginado)
+    let allDevices = [];
+    let lastRowKey = '';
+    for (let page = 0; page < 10; page++) {
+      const url = `/v1.0/iot-03/devices?page_size=100${lastRowKey ? `&last_row_key=${lastRowKey}` : ''}`;
+      const result = await tuyaRequest('GET', url, ID, SECRET, BASE);
+      const list = result?.result?.devices || result?.result || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      allDevices = allDevices.concat(list);
+      if (!result?.result?.last_row_key) break;
+      lastRowKey = result.result.last_row_key;
+    }
+
+    // Pega os dispositivos já cadastrados pelo usuário
+    const saved = await pool.query('SELECT tuya_id FROM user_devices WHERE user_email = $1', [req.user.email]);
+    const savedIds = new Set(saved.rows.map(r => r.tuya_id));
+
+    const devices = allDevices.map(d => ({
+      tuya_id:      d.id,
+      name:         d.name || d.local_key || d.id,
+      category:     d.category,
+      product_name: d.product_name || '',
+      online:       d.online ?? false,
+      already_added: savedIds.has(d.id),
+    }));
+
+    res.json({ devices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Remove um dispositivo do usuário
 app.delete('/my-devices/:id', authMiddleware, async (req, res) => {
   try {
