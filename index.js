@@ -7,10 +7,85 @@ const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
 const webpush = require('web-push');
+const nodemailer = require('nodemailer');
 
-// Cliente JWKS para verificar tokens RS256 do Supabase
+// Configuração do transporte de e-mail (Gmail)
+const mailTransport = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD
+  }
+});
+
+async function sendInviteEmail({ ownerEmail, guestEmail, permission, token, backendUrl, frontendUrl }) {
+  const acceptUrl  = `${backendUrl}/shares/accept/${token}`;
+  const declineUrl = `${backendUrl}/shares/decline/${token}`;
+
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+  <body style="margin:0;padding:0;background:#0f172a;font-family:Arial,sans-serif">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 0">
+      <tr><td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;overflow:hidden;max-width:560px;width:100%">
+          <!-- Header -->
+          <tr><td style="background:linear-gradient(135deg,#6366f1,#8b5cf6);padding:32px;text-align:center">
+            <div style="font-size:40px;margin-bottom:8px">🏠</div>
+            <h1 style="color:#fff;margin:0;font-size:24px;font-weight:700">iHome</h1>
+            <p style="color:#c4b5fd;margin:8px 0 0;font-size:14px">Automação Residencial</p>
+          </td></tr>
+          <!-- Body -->
+          <tr><td style="padding:32px">
+            <h2 style="color:#f1f5f9;margin:0 0 16px;font-size:20px">Você recebeu um convite!</h2>
+            <p style="color:#94a3b8;margin:0 0 24px;font-size:15px;line-height:1.6">
+              <strong style="color:#e2e8f0">${ownerEmail}</strong> está convidando você para acessar e controlar os dispositivos da casa dele(a) com permissão de
+              <strong style="color:#a78bfa">${permission === 'view' ? 'visualização' : 'controle'}</strong>.
+            </p>
+            <p style="color:#64748b;margin:0 0 32px;font-size:13px">
+              Ao aceitar, você poderá ver e controlar os dispositivos cadastrados no iHome desta residência.
+            </p>
+            <!-- Buttons -->
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td width="48%" style="padding-right:8px">
+                  <a href="${acceptUrl}" style="display:block;background:#16a34a;color:#fff;text-decoration:none;text-align:center;padding:14px;border-radius:10px;font-size:15px;font-weight:700">
+                    ✅ Aceitar convite
+                  </a>
+                </td>
+                <td width="48%" style="padding-left:8px">
+                  <a href="${declineUrl}" style="display:block;background:#dc2626;color:#fff;text-decoration:none;text-align:center;padding:14px;border-radius:10px;font-size:15px;font-weight:700">
+                    ❌ Recusar convite
+                  </a>
+                </td>
+              </tr>
+            </table>
+            <p style="color:#475569;margin:28px 0 0;font-size:12px;text-align:center">
+              Se você não esperava este convite, pode ignorar este e-mail com segurança.
+            </p>
+          </td></tr>
+          <!-- Footer -->
+          <tr><td style="background:#0f172a;padding:20px;text-align:center">
+            <p style="color:#334155;margin:0;font-size:12px">iHome Automação Residencial</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+  </html>`;
+
+  await mailTransport.sendMail({
+    from: `"iHome" <${process.env.GMAIL_USER}>`,
+    to: guestEmail,
+    subject: `🏠 ${ownerEmail} convidou você para a casa deles no iHome`,
+    html
+  });
+}
+
+// Cliente JWKS para verificar tokens ES256 do Supabase
 const supabaseJwks = jwksClient({
-  jwksUri: `https://${process.env.SUPABASE_PROJECT_ID}.supabase.co/.well-known/jwks.json`,
+  jwksUri: `https://${process.env.SUPABASE_PROJECT_ID}.supabase.co/auth/v1/.well-known/jwks.json`,
   cache: true,
   cacheMaxEntries: 5,
   cacheMaxAge: 600000 // 10 minutos
@@ -109,10 +184,15 @@ async function initDB() {
       owner_email TEXT NOT NULL,
       guest_email TEXT NOT NULL,
       permission TEXT NOT NULL DEFAULT 'control',
+      status TEXT NOT NULL DEFAULT 'pending',
+      invite_token TEXT,
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE(owner_email, guest_email)
     )
   `);
+  // Migração: adicionar colunas novas se a tabela já existia
+  await pool.query(`ALTER TABLE home_shares ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`);
+  await pool.query(`ALTER TABLE home_shares ADD COLUMN IF NOT EXISTS invite_token TEXT`);
   // Assinaturas de push notification por usuário
   await pool.query(`
     CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -140,8 +220,8 @@ function authMiddleware(req, res, next) {
   if (!authHeader) return res.status(401).json({ error: 'Token não fornecido' });
   const token = authHeader.split(' ')[1];
 
-  // Tenta RS256 via JWKS primeiro (novo padrão Supabase)
-  jwt.verify(token, getSigningKey, { algorithms: ['RS256'] }, (err, decoded) => {
+  // Tenta ES256 via JWKS primeiro (novo padrão Supabase)
+  jwt.verify(token, getSigningKey, { algorithms: ['ES256'] }, (err, decoded) => {
     if (!err) {
       req.user = { email: decoded.email, id: decoded.sub };
       return next();
@@ -205,12 +285,12 @@ app.get('/my-devices', authMiddleware, async (req, res) => {
       "SELECT *, user_email as owner_email, 'own' as access_type FROM user_devices WHERE user_email = $1 ORDER BY created_at",
       [req.user.email]
     );
-    // Dispositivos de casas compartilhadas comigo
+    // Dispositivos de casas compartilhadas comigo (apenas convites aceitos)
     const shared = await pool.query(
       `SELECT ud.*, ud.user_email as owner_email, 'shared' as access_type, hs.permission
        FROM home_shares hs
        JOIN user_devices ud ON ud.user_email = hs.owner_email
-       WHERE hs.guest_email = $1
+       WHERE hs.guest_email = $1 AND hs.status = 'accepted'
        ORDER BY ud.created_at`,
       [req.user.email]
     );
@@ -239,7 +319,7 @@ app.post('/my-devices', authMiddleware, async (req, res) => {
 
 // ── COMPARTILHAMENTO DE CASA ─────────────────────────────────
 
-// Lista quem tem acesso à minha casa
+// Lista quem tem acesso à minha casa (qualquer status)
 app.get('/shares', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -250,32 +330,85 @@ app.get('/shares', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Lista casas que foram compartilhadas comigo
+// Lista casas que foram compartilhadas comigo (apenas aceitas)
 app.get('/shared-with-me', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT hs.*, COUNT(ud.id)::int as device_count FROM home_shares hs LEFT JOIN user_devices ud ON ud.user_email = hs.owner_email WHERE hs.guest_email = $1 GROUP BY hs.id ORDER BY hs.created_at DESC',
+      `SELECT hs.*, COUNT(ud.id)::int as device_count
+       FROM home_shares hs
+       LEFT JOIN user_devices ud ON ud.user_email = hs.owner_email
+       WHERE hs.guest_email = $1 AND hs.status = 'accepted'
+       GROUP BY hs.id ORDER BY hs.created_at DESC`,
       [req.user.email]
     );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Convidar alguém para minha casa
+// Convidar alguém para minha casa (envia email com token)
 app.post('/shares', authMiddleware, async (req, res) => {
   const { guest_email, permission = 'control' } = req.body;
   if (!guest_email) return res.status(400).json({ error: 'E-mail do convidado é obrigatório' });
   if (guest_email === req.user.email) return res.status(400).json({ error: 'Você não pode convidar a si mesmo' });
   try {
+    const token = require('crypto').randomBytes(32).toString('hex');
     const result = await pool.query(
-      `INSERT INTO home_shares (owner_email, guest_email, permission)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (owner_email, guest_email) DO UPDATE SET permission = $3
+      `INSERT INTO home_shares (owner_email, guest_email, permission, status, invite_token)
+       VALUES ($1, $2, $3, 'pending', $4)
+       ON CONFLICT (owner_email, guest_email) DO UPDATE
+         SET permission = $3, status = 'pending', invite_token = $4
        RETURNING *`,
-      [req.user.email, guest_email, permission]
+      [req.user.email, guest_email, permission, token]
     );
-    res.json(result.rows[0]);
+    // Envia email de convite
+    const backendUrl  = process.env.BACKEND_URL  || 'https://ihome-backend-production.up.railway.app';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://ihome-self.vercel.app';
+    try {
+      await sendInviteEmail({
+        ownerEmail: req.user.email,
+        guestEmail: guest_email,
+        permission,
+        token,
+        backendUrl,
+        frontendUrl
+      });
+    } catch (mailErr) {
+      console.error('❌ Erro ao enviar e-mail de convite:', mailErr.message);
+      // Não bloqueia a resposta — o convite foi salvo mesmo assim
+    }
+    res.json({ ...result.rows[0], emailSent: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Aceitar convite via link do e-mail (sem autenticação)
+app.get('/shares/accept/:token', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE home_shares SET status = 'accepted' WHERE invite_token = $1 AND status = 'pending' RETURNING *`,
+      [req.params.token]
+    );
+    const frontendUrl = process.env.FRONTEND_URL || 'https://ihome-self.vercel.app';
+    if (result.rowCount === 0) {
+      return res.redirect(`${frontendUrl}?invite=invalid`);
+    }
+    res.redirect(`${frontendUrl}?invite=accepted`);
+  } catch (err) {
+    res.status(500).send('Erro ao processar convite');
+  }
+});
+
+// Recusar convite via link do e-mail (sem autenticação)
+app.get('/shares/decline/:token', async (req, res) => {
+  try {
+    await pool.query(
+      `DELETE FROM home_shares WHERE invite_token = $1 AND status = 'pending'`,
+      [req.params.token]
+    );
+    const frontendUrl = process.env.FRONTEND_URL || 'https://ihome-self.vercel.app';
+    res.redirect(`${frontendUrl}?invite=declined`);
+  } catch (err) {
+    res.status(500).send('Erro ao processar convite');
+  }
 });
 
 // Remover acesso de alguém
