@@ -15,6 +15,9 @@
       "lcov",
       "text",
       "json-summary"
+    ],
+    "collectCoverageFrom": [
+      "index.js"
     ]
   },
   "keywords": [],

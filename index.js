@@ -967,4 +967,4 @@ if (require.main === module) {
   app.listen(PORT, () => console.log(`🏠 iHome API rodando em http://localhost:${PORT}`));
 }
 
-module.exports = { app, pool };
+module.exports = { app, pool, tokenCache };
