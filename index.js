@@ -5,7 +5,16 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const jwksClient = require('jwks-rsa');
 const webpush = require('web-push');
+
+// Cliente JWKS para verificar tokens RS256 do Supabase
+const supabaseJwks = jwksClient({
+  jwksUri: `https://${process.env.SUPABASE_PROJECT_ID}.supabase.co/.well-known/jwks.json`,
+  cache: true,
+  cacheMaxEntries: 5,
+  cacheMaxAge: 600000 // 10 minutos
+});
 
 // Configura VAPID para notificações push
 let pushReady = false;
@@ -118,18 +127,37 @@ async function initDB() {
 initDB().catch(err => console.error('❌ Erro ao iniciar banco:', err));
 
 // ── AUTENTICAÇÃO (Supabase JWT) ──────────────────────────────
-// Verifica o "crachá" digital do usuário antes de qualquer operação
+// Suporte a RS256 (JWKS) e HS256 (legacy secret) para máxima compatibilidade
+function getSigningKey(header, callback) {
+  supabaseJwks.getSigningKey(header.kid, (err, key) => {
+    if (err) return callback(err);
+    callback(null, key.getPublicKey());
+  });
+}
+
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Token não fornecido' });
   const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET);
-    req.user = { email: decoded.email, id: decoded.sub };
-    next();
-  } catch {
+
+  // Tenta RS256 via JWKS primeiro (novo padrão Supabase)
+  jwt.verify(token, getSigningKey, { algorithms: ['RS256'] }, (err, decoded) => {
+    if (!err) {
+      req.user = { email: decoded.email, id: decoded.sub };
+      return next();
+    }
+    // Fallback: HS256 com legacy secret (caso ainda em uso)
+    if (process.env.SUPABASE_JWT_SECRET) {
+      try {
+        const decoded2 = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, { algorithms: ['HS256'] });
+        req.user = { email: decoded2.email, id: decoded2.sub };
+        return next();
+      } catch {
+        // cai no erro abaixo
+      }
+    }
     res.status(401).json({ error: 'Token inválido ou expirado. Faça login novamente.' });
-  }
+  });
 }
 
 // ── CREDENCIAIS TUYA ─────────────────────────────────────────
