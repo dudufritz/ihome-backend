@@ -118,10 +118,7 @@ app.use(express.json());
 
 // ── BANCO DE DADOS ───────────────────────────────────────────
 // O Pool é a "conexão" com o banco de dados PostgreSQL
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // Cria as tabelas automaticamente quando o servidor inicia
 async function initDB() {
