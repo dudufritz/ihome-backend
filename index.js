@@ -1,4 +1,9 @@
-if (process.env.NEW_RELIC_LICENSE_KEY) require('newrelic');
+if (process.env.NEW_RELIC_LICENSE_KEY) {
+  require('newrelic');
+  console.log('✅ NewRelic carregado');
+} else {
+  console.log('⚠️  NEW_RELIC_LICENSE_KEY não encontrada');
+}
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
