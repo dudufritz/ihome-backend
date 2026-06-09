@@ -1,3 +1,4 @@
+if (process.env.NEW_RELIC_LICENSE_KEY) require('newrelic');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');

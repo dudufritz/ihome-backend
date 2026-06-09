@@ -11,7 +11,11 @@
   "jest": {
     "testEnvironment": "node",
     "coverageDirectory": "coverage",
-    "coverageReporters": ["lcov", "text", "json-summary"]
+    "coverageReporters": [
+      "lcov",
+      "text",
+      "json-summary"
+    ]
   },
   "keywords": [],
   "author": "",
@@ -26,6 +30,7 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^4.0.1",
+    "newrelic": "^12.25.1",
     "nodemailer": "^8.0.10",
     "pg": "8.13.3",
     "web-push": "^3.6.7"
