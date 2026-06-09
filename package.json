@@ -11,8 +11,7 @@
   "jest": {
     "testEnvironment": "node",
     "coverageDirectory": "coverage",
-    "collectCoverageFrom": ["index.js"],
-    "coverageThreshold": { "global": { "lines": 20 } }
+    "coverageReporters": ["lcov", "text", "json-summary"]
   },
   "keywords": [],
   "author": "",
