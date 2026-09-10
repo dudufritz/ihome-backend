@@ -9,8 +9,8 @@ API REST do iHome, sistema de automação residencial que conecta o usuário aos
 | | |
 |---|---|
 | **Frontend** | [ihome-frontend](https://github.com/dudufritz/ihome-frontend) |
-| **Documentação** | [Wiki](../../wiki) · [Arquitetura](ARQUITETURA.md) · [Deploy](infra/AWS.md) |
-| **Stack** | Node.js 24 · Express 5 · PostgreSQL 16 · Docker · Caddy · AWS EC2 |
+| **Documentação** | [Wiki](../../wiki) · [Arquitetura](ARQUITETURA.md) · [Deploy](DEPLOY.md) |
+| **Stack** | Node.js 24 · Express 5 · PostgreSQL 16 · Docker · Azure App Service |
 
 ---
 

@@ -1,2 +1,9 @@
-node_modules 
-.env 
+# Dependencias instaladas pelo npm — reconstruidas a partir do package-lock.json
+node_modules
+
+# Segredos reais. O que fica versionado e o .env.example, sem valores.
+.env
+
+# Relatorio de cobertura gerado pelo `npm test`.
+# E saida de build: muda a cada execucao e polui o diff sem informar nada.
+coverage
