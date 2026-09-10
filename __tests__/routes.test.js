@@ -1,14 +1,24 @@
 /**
  * routes.test.js — Testes de integracao com app REAL
  */
-process.env.SUPABASE_JWT_SECRET = 'test-secret-key';
+process.env.JWT_SECRET = 'test-secret-key';
 process.env.DATABASE_URL = 'postgresql://mock:mock@localhost/mock';
 process.env.VAPID_PUBLIC_KEY = '';
 process.env.VAPID_PRIVATE_KEY = '';
+// O assistente exige a chave configurada; sem ela a rota responde 503 antes
+// de chamar o modelo. Como estes testes exercitam justamente o caminho do
+// Gemini (com axios mockado), a chave precisa existir no ambiente de teste.
+process.env.GEMINI_API_KEY = 'test-gemini-key';
 
 const mockQuery = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
 jest.mock('pg', () => {
-  const Pool = jest.fn().mockImplementation(() => ({ query: mockQuery }));
+  // O mock precisa expor a mesma interface do Pool real: alem de query(),
+  // o codigo de producao registra um listener de erro com pool.on('error').
+  const Pool = jest.fn().mockImplementation(() => ({
+    query: mockQuery,
+    on: jest.fn(),
+    end: jest.fn().mockResolvedValue(undefined),
+  }));
   return { Pool };
 });
 jest.mock('web-push', () => ({
@@ -21,11 +31,6 @@ jest.mock('nodemailer', () => ({
     sendMail: jest.fn().mockResolvedValue({ messageId: 'test-id' }),
   })),
 }));
-jest.mock('jwks-rsa', () =>
-  jest.fn(() => ({
-    getSigningKey: jest.fn((_kid, cb) => cb(new Error('JWKS mock error'))),
-  }))
-);
 jest.mock('axios', () => {
   const fn = jest.fn();
   fn.get  = jest.fn();
@@ -54,7 +59,7 @@ beforeEach(() => {
 afterAll(() => { jest.clearAllMocks(); });
 
 function tok(email = 'test@ihome.com', sub = 'u1') {
-  return jwt.sign({ email, sub }, process.env.SUPABASE_JWT_SECRET, { algorithm: 'HS256' });
+  return jwt.sign({ email, sub }, process.env.JWT_SECRET, { algorithm: 'HS256' });
 }
 
 // ── PUBLICAS ──────────────────────────────────────────────────
@@ -431,6 +436,8 @@ describe('GET /devices', () => {
 
 describe('POST /devices/:id/command', () => {
   test('envia comando ligar => 200', async () => {
+    // nome do dispositivo (buscado antes das credenciais)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Lamp' }], rowCount: 1 });
     // getUserTuya
     mockQuery.mockResolvedValueOnce({
       rows: [{ tuya_access_id: 'acc', tuya_secret: 'sec', tuya_base_url: 'https://openapi.tuyaus.com' }],
@@ -448,7 +455,8 @@ describe('POST /devices/:id/command', () => {
   });
 
   test('sem credenciais Tuya retorna 500', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // nome
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // getUserTuya sem config
     const r = await request(app).post('/devices/d1/command').set('Authorization', `Bearer ${tok()}`)
       .send({ commands: [{ code: 'switch_1', value: true }] });
     expect(r.status).toBe(500);
@@ -560,7 +568,8 @@ describe('GET /discover-devices', () => {
   });
 
   test('sem credenciais Tuya retorna 500', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // nome
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // getUserTuya sem config
     const r = await request(app).get('/discover-devices').set('Authorization', `Bearer ${tok()}`);
     expect(r.status).toBe(500);
   });

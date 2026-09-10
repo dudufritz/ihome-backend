@@ -1,12 +1,17 @@
 {
   "name": "ihome-backend",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.1.0",
+  "description": "API do iHome — automação residencial com integração Tuya IoT, assistente de IA e auditoria",
   "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node index.js",
+    "dev": "node --watch index.js",
     "test": "jest --coverage --forceExit",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "gen:key": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
   },
   "jest": {
     "testEnvironment": "node",
@@ -17,7 +22,11 @@
       "json-summary"
     ],
     "collectCoverageFrom": [
-      "index.js"
+      "index.js",
+      "src/**/*.js"
+    ],
+    "coveragePathIgnorePatterns": [
+      "/node_modules/"
     ]
   },
   "keywords": [],
@@ -27,12 +36,14 @@
   "dependencies": {
     "@tuya/tuya-connector-nodejs": "^2.1.2",
     "axios": "^1.16.1",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "crypto-js": "^4.2.0",
     "dotenv": "16.4.5",
     "express": "^5.2.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
-    "jwks-rsa": "^4.0.1",
     "newrelic": "^12.25.1",
     "nodemailer": "^8.0.10",
     "pg": "8.13.3",

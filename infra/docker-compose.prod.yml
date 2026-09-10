@@ -1,0 +1,135 @@
+# ═══════════════════════════════════════════════════════════════════
+#  iHome — produção numa única VM
+#
+#  Quatro contêineres:
+#    db          PostgreSQL 16 com volume persistente
+#    api         backend Node.js, imagem publicada pelo GitHub Actions
+#    caddy       HTTPS automático + serve o frontend + proxy /api
+#    watchtower  atualiza a API quando sai imagem nova, SEM SSH
+#
+#  A ausência de SSH no fluxo de deploy é deliberada: a disciplina veda
+#  "deploy manual via SSH/FTP". Aqui o pipeline apenas PUBLICA a imagem
+#  num registry; a VM observa o registry e converge sozinha.
+# ═══════════════════════════════════════════════════════════════════
+services:
+
+  # ── Banco de dados ──
+  db:
+    image: postgres:16-alpine
+    restart: always                 # volta sozinho após reboot da VM
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ihome
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backups:/backups          # destino do pg_dump diário
+    # Sem `ports`: o banco NÃO é exposto à internet. Só os contêineres
+    # da mesma rede do compose o alcançam. É a diferença entre um Postgres
+    # acessível do mundo inteiro e um que só a API enxerga.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ihome"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Limites de memória: numa VM de 2 GB, um pico do Postgres não pode
+    # derrubar a API por falta de RAM.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  # ── API ──
+  api:
+    image: ghcr.io/${GITHUB_REPO}/ihome-backend:latest
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/ihome
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # Mesma origem para os dois: o Caddy serve frontend e API no mesmo
+      # domínio, então não há CORS entre eles.
+      BACKEND_URL: https://${DOMINIO}
+      FRONTEND_URL: https://${DOMINIO}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_EMAIL: ${VAPID_EMAIL:-mailto:admin@ihome.app}
+      NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY:-}
+      NEW_RELIC_APP_NAME: iHome API
+    labels:
+      # Etiqueta que autoriza o Watchtower a atualizar ESTE contêiner.
+      # Sem ela, ele ignora o serviço — é o que impede que o banco seja
+      # reiniciado por engano numa atualização da API.
+      com.centurylinklabs.watchtower.scope: ihome
+      com.centurylinklabs.watchtower.enable: "true"
+    # Também sem `ports`: quem fala com a internet é o Caddy. A API só
+    # é alcançável pela rede interna do compose.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      # Sem isto, o log cresce até encher o disco de 30 GB — é a causa
+      # mais comum de VM pequena parar depois de meses no ar.
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Frontend + proxy reverso com HTTPS ──
+  # A imagem já traz o build do React e o Caddyfile. Atualizar o site é
+  # publicar uma imagem nova — sem copiar arquivo nenhum para a VM.
+  web:
+    image: ghcr.io/${GITHUB_REPO}/ihome-frontend:latest
+    restart: always
+    ports:
+      - "80:80"                     # exigido pelo desafio HTTP do Let's Encrypt
+      - "443:443"
+    volumes:
+      # Os certificados PRECISAM sobreviver a reinícios: o Let's Encrypt
+      # limita a 5 emissões por semana para o mesmo domínio, e sem este
+      # volume cada restart pediria um certificado novo.
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMINIO: ${DOMINIO}
+    depends_on:
+      - api
+    labels:
+      com.centurylinklabs.watchtower.scope: ihome
+      com.centurylinklabs.watchtower.enable: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Atualizador automático ──
+  watchtower:
+    image: containrrr/watchtower
+    restart: always
+    volumes:
+      # Precisa do socket do Docker para trocar contêineres. É o
+      # componente mais privilegiado da stack — por isso observa APENAS
+      # o contêiner da API (--scope), e não tudo que roda na máquina.
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >
+      --interval 120
+      --cleanup
+      --scope ihome
+      --label-enable
+    labels:
+      com.centurylinklabs.watchtower.scope: ihome
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,15 @@
+# Não copiar para dentro da imagem — reduz o contexto de build,
+# acelera o docker build e evita vazar segredo por descuido.
+node_modules
+coverage
+.git
+.github
+.env
+.env.*
+!.env.example
+*.md
+__tests__/**/__snapshots__
+.claude
+npm-debug.log*
+Dockerfile
+.dockerignore

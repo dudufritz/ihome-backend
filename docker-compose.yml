@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════════════
+#  iHome — ambiente de desenvolvimento local
+#
+#  Sobe o banco e a API com um comando:
+#      docker compose up
+#
+#  O frontend roda separado com `npm start`, porque o servidor de
+#  desenvolvimento do Create React App é bem mais rápido fora do
+#  container e mantém o hot reload funcionando.
+# ═══════════════════════════════════════════════════════════════════
+services:
+
+  # ── Banco de dados ──
+  # Mesma versão do Azure Database for PostgreSQL Flexible Server, para
+  # o ambiente local reproduzir produção em vez de aproximá-la.
+  db:
+    image: postgres:16-alpine
+    container_name: ihome-db
+    environment:
+      POSTGRES_USER: ihome
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: ihome
+    ports:
+      - "5432:5432"          # exposto para você inspecionar com psql ou DBeaver
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # A API só sobe depois que o banco aceita conexões. Sem isto, o
+      # initDB() rodaria antes do Postgres estar pronto e falharia.
+      test: ["CMD-SHELL", "pg_isready -U ihome -d ihome"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── API ──
+  api:
+    build:
+      context: .
+      target: build        # estágio com devDependencies, para poder testar
+    container_name: ihome-api
+    command: node index.js
+    ports:
+      - "3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      # 'db' é o nome do serviço acima — o Docker resolve como hostname.
+      DATABASE_URL: postgresql://ihome:devpass@db:5432/ihome
+      # Segredos de desenvolvimento. NUNCA reutilize estes em produção.
+      JWT_SECRET: dev-secret-trocar-em-producao-0123456789abcdef
+      ENCRYPTION_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+      BACKEND_URL: http://localhost:3001
+      FRONTEND_URL: http://localhost:3000
+      # Limites folgados em desenvolvimento, para não atrapalhar os testes manuais.
+      RATE_LIMIT_GLOBAL: 10000
+      RATE_LIMIT_AUTH: 1000
+      # Opcionais: preencha no .env se quiser exercitar IA, e-mail ou push.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+    volumes:
+      # Código montado de fora: editar um arquivo reflete no container sem
+      # reconstruir a imagem. node_modules fica de fora do mapeamento para
+      # não sobrescrever o que foi instalado dentro dela.
+      - ./index.js:/app/index.js:ro
+      - ./src:/app/src:ro
+
+volumes:
+  pgdata:

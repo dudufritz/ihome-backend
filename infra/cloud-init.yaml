@@ -1,0 +1,140 @@
+#cloud-config
+# ═══════════════════════════════════════════════════════════════════
+#  iHome — provisionamento da VM
+#
+#  O cloud-init roda UMA VEZ, no primeiro boot. Tudo que a máquina
+#  precisa é declarado aqui, o que torna a VM descartável: se ela for
+#  perdida, criar outra idêntica é rodar o mesmo comando.
+#
+#  É também o que sustenta o argumento de "domínio técnico sobre o
+#  ambiente": a infraestrutura está versionada no repositório, não em
+#  cliques num portal que ninguém lembra depois.
+# ═══════════════════════════════════════════════════════════════════
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+  - ufw
+  - unattended-upgrades   # aplica correções de segurança do SO sozinho
+
+write_files:
+  # ── Ajustes de kernel ──
+  - path: /etc/sysctl.d/99-ihome.conf
+    content: |
+      # A VM tem 2 GB. O Postgres reserva memória compartilhada e o
+      # kernel, por padrão, recusa alocações grandes sob pressão.
+      vm.overcommit_memory = 1
+      # Aumenta a fila de conexões pendentes: com o padrão (128), um
+      # pico de acessos no Demo Day começaria a recusar conexões.
+      net.core.somaxconn = 1024
+
+  # ── Serviço que sobe a stack no boot ──
+  - path: /etc/systemd/system/ihome.service
+    content: |
+      [Unit]
+      Description=iHome — stack de produção
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/ihome
+      # --wait faz o systemd só considerar o serviço pronto quando os
+      # healthchecks passarem, em vez de logo após o comando retornar.
+      ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up -d
+      ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
+      TimeoutStartSec=300
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ── Backup diário ──
+  - path: /etc/systemd/system/ihome-backup.service
+    content: |
+      [Unit]
+      Description=Backup do banco iHome
+      [Service]
+      Type=oneshot
+      WorkingDirectory=/opt/ihome
+      EnvironmentFile=/opt/ihome/.env
+      ExecStart=/opt/ihome/backup.sh
+
+  - path: /etc/systemd/system/ihome-backup.timer
+    content: |
+      [Unit]
+      Description=Executa o backup do iHome diariamente
+      [Timer]
+      OnCalendar=*-*-* 04:00:00
+      # Se a VM estiver desligada no horário, roda assim que ligar —
+      # em vez de simplesmente pular o dia.
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # ── Docker, do repositório oficial ──
+  # O pacote docker.io do Ubuntu costuma estar desatualizado e não traz
+  # o plugin `docker compose` v2.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - >
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc]
+    https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable"
+    > /etc/apt/sources.list.d/docker.list
+  - apt-get update -y
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+
+  # ── Firewall ──
+  # Só 80 e 443 abertos. O Postgres (5432) e a API (3001) NÃO são
+  # expostos — só o Caddy publica portas, e ele fala com os dois pela
+  # rede interna do compose.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment 'SSH — administração, não deploy'
+  - ufw allow 80/tcp comment 'HTTP — desafio do Let'"'"'s Encrypt'
+  - ufw allow 443/tcp comment 'HTTPS'
+  - ufw --force enable
+
+  # ── Arquivos da aplicação ──
+  # Clona o repositório público só para obter o compose, o Caddyfile e o
+  # script de backup. As IMAGENS vêm do registry, não deste clone.
+  - git clone --depth 1 https://github.com/dudufritz/ihome-backend.git /tmp/ihome-repo
+  - mkdir -p /opt/ihome/backups
+  - cp /tmp/ihome-repo/infra/docker-compose.prod.yml /opt/ihome/
+  - cp /tmp/ihome-repo/infra/backup.sh /opt/ihome/
+  - cp /tmp/ihome-repo/infra/.env.prod.example /opt/ihome/.env.example
+  - chmod +x /opt/ihome/backup.sh
+  - rm -rf /tmp/ihome-repo
+
+  # ── Correções de segurança automáticas ──
+  - echo 'Unattended-Upgrade::Automatic-Reboot "true";' > /etc/apt/apt.conf.d/51unattended-upgrades-ihome
+  - echo 'Unattended-Upgrade::Automatic-Reboot-Time "05:00";' >> /etc/apt/apt.conf.d/51unattended-upgrades-ihome
+  - systemctl enable unattended-upgrades
+
+  - systemctl daemon-reload
+  - systemctl enable ihome-backup.timer
+
+  # A stack NÃO sobe agora: falta o /opt/ihome/.env com os segredos.
+  # O serviço fica habilitado e sobe no próximo boot, ou quando você
+  # rodar `systemctl start ihome` depois de preencher o arquivo.
+  - systemctl enable ihome.service
+
+final_message: |
+  ═══════════════════════════════════════════════════════════
+   VM do iHome pronta. Faltam dois passos:
+
+   1. Criar /opt/ihome/.env a partir de /opt/ihome/.env.example
+   2. sudo systemctl start ihome
+
+   Docker, firewall, backup diário e atualizações automáticas
+   já estão configurados.
+  ═══════════════════════════════════════════════════════════
