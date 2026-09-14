@@ -225,27 +225,49 @@ describe('POST /shares', () => {
   });
 });
 
+// O mock devolve a linha apagada porque o DELETE usa RETURNING *, e e dela
+// que sai quem perdeu o acesso para o registro de auditoria. Um mock com
+// rowCount:1 e rows:[] descreveria algo que o Postgres nunca devolve.
 describe('DELETE /shares/:id', () => {
   test('remove => success:true', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'u@test.com', guest_email:'convidado@test.com', permission:'control', status:'accepted'}],
+      rowCount:1,
+    });
     const r = await request(app).delete('/shares/1').set('Authorization',`Bearer ${tok()}`);
     expect(r.status).toBe(200);
     expect(r.body.success).toBe(true);
+  });
+  test('id inexistente => 404', async () => {
+    mockQuery.mockResolvedValueOnce({rows:[],rowCount:0});
+    const r = await request(app).delete('/shares/999').set('Authorization',`Bearer ${tok()}`);
+    expect(r.status).toBe(404);
   });
 });
 
 describe('DELETE /shared-with-me/:id', () => {
   test('remove acesso => success:true', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'dono@test.com', guest_email:'u@test.com', permission:'control', status:'accepted'}],
+      rowCount:1,
+    });
     const r = await request(app).delete('/shared-with-me/1').set('Authorization',`Bearer ${tok()}`);
     expect(r.status).toBe(200);
     expect(r.body.success).toBe(true);
+  });
+  test('id inexistente => 404', async () => {
+    mockQuery.mockResolvedValueOnce({rows:[],rowCount:0});
+    const r = await request(app).delete('/shared-with-me/999').set('Authorization',`Bearer ${tok()}`);
+    expect(r.status).toBe(404);
   });
 });
 
 describe('Aceite/Recusa de convite', () => {
   test('accept token valido => 302 redirect accepted', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[{id:1}],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'dono@test.com', guest_email:'convidado@test.com', permission:'control'}],
+      rowCount:1,
+    });
     const r = await request(app).get('/shares/accept/tok-valido');
     expect(r.status).toBe(302);
   });
