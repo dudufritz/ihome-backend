@@ -20,8 +20,19 @@ const { asyncHandler } = require('../utils/http');
 const { normalizeEmail, isValidEmail } = require('../utils/email');
 const { PERMISSOES_VALIDAS } = require('../services/sharing.service');
 const { sendInviteEmail } = require('../services/mail.service');
+const { recordAudit } = require('../services/audit.service');
 
 const router = express.Router();
+
+/**
+ * Traduz a permissão para a frase que aparece na tela de auditoria.
+ *
+ * Fica aqui, e não no frontend, pelo mesmo motivo de describeCommands: o log
+ * guarda o que aconteceu em linguagem de gente. A interface apenas exibe.
+ */
+function descreverPermissao(permission) {
+  return permission === 'view' ? 'apenas ver' : 'ver e controlar';
+}
 
 /** GET /shares — quem tem (ou foi convidado a ter) acesso à minha casa. */
 router.get('/shares', authMiddleware, asyncHandler(async (req, res) => {
@@ -90,14 +101,36 @@ router.post('/shares', authMiddleware, asyncHandler(async (req, res) => {
   // O convite já está gravado. Se o e-mail falhar, registramos e seguimos:
   // desfazer o convite por causa de uma indisponibilidade do SMTP seria pior.
   let emailSent = true;
+  let erroEmail = null;
   try {
     await sendInviteEmail({
       ownerEmail: req.user.email, guestEmail, permission, token,
     });
   } catch (mailErr) {
     emailSent = false;
+    erroEmail = mailErr.message;
     console.error('❌ Erro ao enviar e-mail de convite:', mailErr.message);
   }
+
+  // Auditoria: conceder acesso à própria casa é das ações mais sensíveis do
+  // sistema, e até agora não deixava rastro nenhum.
+  //
+  // O convite entra como 'success' mesmo quando o e-mail falha, porque o
+  // convite de fato existe no banco — o resultado descreve a ação auditada,
+  // não o envio. A falha do SMTP fica em emailSent, para o dono entender por
+  // que o convidado nunca respondeu.
+  await recordAudit(req, {
+    homeOwnerEmail: req.user.email,
+    action: 'share.invite',
+    details: {
+      summary: `Convidou ${guestEmail} (${descreverPermissao(permission)})`,
+      guestEmail,
+      permission,
+      emailSent,
+    },
+    result: 'success',
+    errorMessage: erroEmail,
+  });
 
   res.json({ ...result.rows[0], emailSent });
 }));
@@ -127,33 +160,112 @@ router.get('/shares/accept/:token', asyncHandler(async (req, res) => {
     // a diferença só serviria para alguém confirmar que um token já existiu.
     return res.redirect(`${env.frontendUrl}?invite=invalid`);
   }
+
+  // Auditoria: é o aceite, e não o convite, que liga o acesso. Sem esta linha
+  // o dono veria "convidei fulano" e nunca saberia a partir de quando ele
+  // realmente passou a poder abrir o portão.
+  //
+  // actorEmail vem da linha do convite porque esta rota é pública: quem clica
+  // no link está no e-mail do convidado, e não tem sessão no iHome.
+  const convite = result.rows[0];
+  await recordAudit(req, {
+    homeOwnerEmail: convite.owner_email,
+    actorEmail: convite.guest_email,
+    action: 'share.accept',
+    details: {
+      summary: `Aceitou o convite (${descreverPermissao(convite.permission)})`,
+      permission: convite.permission,
+    },
+    result: 'success',
+  });
+
   res.redirect(`${env.frontendUrl}?invite=accepted`);
 }));
 
 /** GET /shares/decline/:token — recusar pelo link do e-mail (rota pública). */
 router.get('/shares/decline/:token', asyncHandler(async (req, res) => {
-  await pool.query(
-    `DELETE FROM home_shares WHERE invite_token = $1 AND status = 'pending'`,
+  // RETURNING para saber de quem era o convite: sem isso o DELETE apaga a
+  // única fonte que diria quem recusou e de qual casa.
+  const result = await pool.query(
+    `DELETE FROM home_shares WHERE invite_token = $1 AND status = 'pending' RETURNING *`,
     [req.params.token]
   );
+
+  if (result.rowCount > 0) {
+    const convite = result.rows[0];
+    await recordAudit(req, {
+      homeOwnerEmail: convite.owner_email,
+      actorEmail: convite.guest_email,
+      action: 'share.decline',
+      details: { summary: 'Recusou o convite' },
+      result: 'success',
+    });
+  }
+
   res.redirect(`${env.frontendUrl}?invite=declined`);
 }));
 
-/** DELETE /shares/:id — o dono revoga o acesso de um convidado. */
+/**
+ * DELETE /shares/:id — o dono revoga o acesso de um convidado.
+ *
+ * O `AND owner_email = $2` é o que impede alguém de revogar compartilhamento
+ * de casa alheia passando outro id: a linha simplesmente não casa.
+ */
 router.delete('/shares/:id', authMiddleware, asyncHandler(async (req, res) => {
-  await pool.query(
-    'DELETE FROM home_shares WHERE id = $1 AND owner_email = $2',
+  const result = await pool.query(
+    'DELETE FROM home_shares WHERE id = $1 AND owner_email = $2 RETURNING *',
     [req.params.id, req.user.email]
   );
+
+  // Antes esta rota respondia success mesmo sem apagar nada — um id inexistente
+  // ou de outro dono devolvia 200, e a tela dizia que o acesso foi revogado
+  // quando ele continuava valendo. Agora o 404 diz a verdade.
+  if (result.rowCount === 0) {
+    return res.status(404).json({ error: 'Compartilhamento não encontrado' });
+  }
+
+  const share = result.rows[0];
+  await recordAudit(req, {
+    homeOwnerEmail: req.user.email,
+    action: 'share.revoke',
+    details: {
+      summary: `Revogou o acesso de ${share.guest_email}`,
+      guestEmail: share.guest_email,
+      permission: share.permission,
+      // Registrar se o convite chegou a ser aceito separa "cancelei um convite
+      // que ninguém respondeu" de "tirei o acesso de quem já estava dentro".
+      statusAnterior: share.status,
+    },
+    result: 'success',
+  });
+
   res.json({ success: true });
 }));
 
-/** DELETE /shared-with-me/:id — o convidado sai da casa por conta própria. */
+/**
+ * DELETE /shared-with-me/:id — o convidado sai da casa por conta própria.
+ *
+ * É o caso que justifica a auditoria separar casa de ator: quem age é o
+ * convidado, mas quem precisa enxergar o registro é o dono da casa.
+ */
 router.delete('/shared-with-me/:id', authMiddleware, asyncHandler(async (req, res) => {
-  await pool.query(
-    'DELETE FROM home_shares WHERE id = $1 AND guest_email = $2',
+  const result = await pool.query(
+    'DELETE FROM home_shares WHERE id = $1 AND guest_email = $2 RETURNING *',
     [req.params.id, req.user.email]
   );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ error: 'Compartilhamento não encontrado' });
+  }
+
+  const share = result.rows[0];
+  await recordAudit(req, {
+    homeOwnerEmail: share.owner_email,   // a casa de onde saiu
+    action: 'share.leave',               // o ator sai do token: é o convidado
+    details: { summary: 'Saiu da casa', permission: share.permission },
+    result: 'success',
+  });
+
   res.json({ success: true });
 }));
 

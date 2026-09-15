@@ -35,10 +35,12 @@ const RESULTADOS = ['success', 'error', 'denied'];
  *
  * @param {import('express').Request} req requisição (para extrair ator, IP e user-agent)
  * @param {object} dados descrição da ação
+ * @param {string} [dados.actorEmail] quem agiu, quando não há sessão autenticada
  */
 async function recordAudit(req, {
   homeOwnerEmail,
   action,
+  actorEmail = null,
   deviceId = null,
   deviceName = null,
   details = null,
@@ -46,7 +48,13 @@ async function recordAudit(req, {
   errorMessage = null,
 }) {
   try {
-    const actor = req?.user?.email;
+    // Normalmente o ator sai do token, mas aceitar e recusar convite acontecem
+    // por link de e-mail — rotas públicas, sem req.user. Nesses casos a própria
+    // linha do convite diz quem é o convidado, e a rota informa por actorEmail.
+    //
+    // A ordem importa: req.user tem precedência. Assim uma rota autenticada não
+    // consegue forjar o autor passando actorEmail, nem por engano nem de propósito.
+    const actor = req?.user?.email || actorEmail;
     // Sem ator, sem casa ou sem ação não há o que registrar de útil.
     if (!actor || !homeOwnerEmail || !action) return;
 

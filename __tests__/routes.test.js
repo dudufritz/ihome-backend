@@ -225,27 +225,49 @@ describe('POST /shares', () => {
   });
 });
 
+// O mock devolve a linha apagada porque o DELETE usa RETURNING *, e e dela
+// que sai quem perdeu o acesso para o registro de auditoria. Um mock com
+// rowCount:1 e rows:[] descreveria algo que o Postgres nunca devolve.
 describe('DELETE /shares/:id', () => {
   test('remove => success:true', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'u@test.com', guest_email:'convidado@test.com', permission:'control', status:'accepted'}],
+      rowCount:1,
+    });
     const r = await request(app).delete('/shares/1').set('Authorization',`Bearer ${tok()}`);
     expect(r.status).toBe(200);
     expect(r.body.success).toBe(true);
+  });
+  test('id inexistente => 404', async () => {
+    mockQuery.mockResolvedValueOnce({rows:[],rowCount:0});
+    const r = await request(app).delete('/shares/999').set('Authorization',`Bearer ${tok()}`);
+    expect(r.status).toBe(404);
   });
 });
 
 describe('DELETE /shared-with-me/:id', () => {
   test('remove acesso => success:true', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'dono@test.com', guest_email:'u@test.com', permission:'control', status:'accepted'}],
+      rowCount:1,
+    });
     const r = await request(app).delete('/shared-with-me/1').set('Authorization',`Bearer ${tok()}`);
     expect(r.status).toBe(200);
     expect(r.body.success).toBe(true);
+  });
+  test('id inexistente => 404', async () => {
+    mockQuery.mockResolvedValueOnce({rows:[],rowCount:0});
+    const r = await request(app).delete('/shared-with-me/999').set('Authorization',`Bearer ${tok()}`);
+    expect(r.status).toBe(404);
   });
 });
 
 describe('Aceite/Recusa de convite', () => {
   test('accept token valido => 302 redirect accepted', async () => {
-    mockQuery.mockResolvedValueOnce({rows:[{id:1}],rowCount:1});
+    mockQuery.mockResolvedValueOnce({
+      rows:[{id:1, owner_email:'dono@test.com', guest_email:'convidado@test.com', permission:'control'}],
+      rowCount:1,
+    });
     const r = await request(app).get('/shares/accept/tok-valido');
     expect(r.status).toBe(302);
   });
@@ -555,7 +577,8 @@ describe('GET /discover-devices', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    // tuyaRequest GET /v1.0/iot-03/devices — retorna lista
+    // 1a consulta: /v1.0/iot-01/associated-users/devices — dispositivos que
+    // vieram do app Smart Life, que e o caso da maioria das contas.
     axios.mockResolvedValueOnce({
       data: { result: { devices: [{ id: 'd1', name: 'Lamp', category: 'dj', product_name: 'Smart Bulb', online: true }] } },
     });
@@ -565,6 +588,32 @@ describe('GET /discover-devices', () => {
     expect(r.status).toBe(200);
     expect(r.body.devices).toBeDefined();
     expect(r.body.devices[0].tuya_id).toBe('d1');
+    // Achando pelo primeiro caminho, o segundo nem e consultado.
+    const urls = axios.mock.calls.map(c => c[0]?.url || '');
+    expect(urls.some(u => /associated-users\/devices/.test(u))).toBe(true);
+    expect(urls.some(u => /iot-03\/devices/.test(u))).toBe(false);
+  });
+
+  test('cai para o projeto da nuvem quando o app nao tem nada vinculado', async () => {
+    // O caso inverso: projeto industrial, com dispositivos cadastrados direto
+    // na nuvem em vez de virem de uma conta do app.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tuya_access_id: 'acc3', tuya_secret: 'sec3', tuya_base_url: 'https://openapi.tuyaus.com' }], rowCount: 1,
+    });
+    axios.get.mockResolvedValueOnce({
+      data: { success: true, result: { access_token: 'tok3', expire_time: 7200 } },
+    });
+    axios.mockResolvedValueOnce({ data: { result: { devices: [] } } });          // associated-users: vazio
+    axios.mockResolvedValueOnce({                                                 // iot-03: tem
+      data: { result: { devices: [{ id: 'd9', name: 'Sensor', category: 'pir', online: false }] } },
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    const r = await request(app).get('/discover-devices').set('Authorization', `Bearer ${tok()}`);
+    expect(r.status).toBe(200);
+    expect(r.body.devices[0].tuya_id).toBe('d9');
+    const urls = axios.mock.calls.map(c => c[0]?.url || '');
+    expect(urls.some(u => /associated-users\/devices/.test(u))).toBe(true);
+    expect(urls.some(u => /iot-03\/devices/.test(u))).toBe(true);
   });
 
   test('sem credenciais Tuya retorna 500', async () => {
@@ -581,7 +630,9 @@ describe('GET /discover-devices', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok2', expire_time: 7200 } },
     });
-    axios.mockResolvedValueOnce({ data: { result: { devices: [] } } });
+    // Os DOIS caminhos vazios: conta sem nenhum dispositivo em lugar nenhum.
+    axios.mockResolvedValueOnce({ data: { result: { devices: [] } } }); // associated-users
+    axios.mockResolvedValueOnce({ data: { result: { devices: [] } } }); // iot-03
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const r = await request(app).get('/discover-devices').set('Authorization', `Bearer ${tok()}`);
     expect(r.status).toBe(200);

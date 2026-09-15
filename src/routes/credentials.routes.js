@@ -10,8 +10,23 @@ const { pool } = require('../config/database');
 const { authMiddleware } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/http');
 const { encrypt } = require('../services/crypto.service');
+const { recordAudit } = require('../services/audit.service');
 
 const router = express.Router();
+
+/**
+ * Mostra apenas os 4 últimos caracteres do Access ID: `••••••••a1b2`.
+ *
+ * O suficiente para o dono reconhecer qual credencial foi trocada, sem
+ * transcrever o identificador inteiro para dentro do log. Vale a pena porque
+ * a tabela de auditoria é lida por qualquer pessoa com quem a casa foi
+ * compartilhada — ela não tem a mesma proteção de user_tuya_config.
+ */
+function mascararAccessId(accessId) {
+  const texto = String(accessId || '');
+  if (texto.length <= 4) return '••••';
+  return '••••••••' + texto.slice(-4);
+}
 
 /**
  * GET /tuya-credentials — informa se já existe configuração.
@@ -55,6 +70,25 @@ router.post('/tuya-credentials', authMiddleware, asyncHandler(async (req, res) =
     encrypt(tuya_secret), // ← nunca gravado em texto puro
     tuya_base_url || 'https://openapi.tuyaus.com',
   ]);
+
+  // Auditoria: trocar a credencial redireciona para onde os comandos da casa
+  // são enviados. Quem controla essa chave controla os dispositivos, então a
+  // troca precisa deixar rastro.
+  //
+  // ATENÇÃO AO QUE NÃO ESTÁ AQUI: `tuya_secret` não entra no details, nem
+  // cifrado, nem mascarado, nem o tamanho dele. Cifrar o segredo no banco e
+  // depois copiá-lo para a tabela de auditoria anularia a proteção inteira —
+  // e a auditoria é visível para todo mundo com quem a casa foi compartilhada.
+  await recordAudit(req, {
+    homeOwnerEmail: req.user.email,
+    action: 'credentials.update',
+    details: {
+      summary: 'Atualizou as credenciais Tuya',
+      accessIdMascarado: mascararAccessId(tuya_access_id),
+      baseUrl: tuya_base_url || 'https://openapi.tuyaus.com',
+    },
+    result: 'success',
+  });
 
   res.json({ success: true });
 }));
