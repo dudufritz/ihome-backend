@@ -72,26 +72,68 @@ router.delete('/my-devices/:id', authMiddleware, asyncHandler(async (req, res) =
 }));
 
 /**
+ * Percorre um endpoint paginado da Tuya e devolve tudo que ele listar.
+ *
+ * A Tuya pagina com `last_row_key`: cada resposta traz a chave da próxima
+ * página. O teto de 10 páginas (1.000 dispositivos) é proteção — se a API
+ * devolver sempre uma chave de continuação, o laço para em vez de prender a
+ * requisição para sempre.
+ *
+ * @param {(chave: string) => string} montarUrl monta a URL com a chave de página
+ */
+async function listarPaginado(montarUrl, ID, SECRET, BASE) {
+  let todos = [];
+  let chave = '';
+  for (let pagina = 0; pagina < 10; pagina++) {
+    const resposta = await tuyaRequest('GET', montarUrl(chave), ID, SECRET, BASE);
+    const lista = resposta?.result?.devices || resposta?.result || [];
+    if (!Array.isArray(lista) || lista.length === 0) break;
+    todos = todos.concat(lista);
+    if (!resposta?.result?.last_row_key) break; // acabaram as páginas
+    chave = resposta.result.last_row_key;
+  }
+  return todos;
+}
+
+/**
  * GET /discover-devices — lista tudo que existe na conta Tuya do usuário.
  *
- * A API da Tuya pagina os resultados com last_row_key. Percorremos no máximo
- * 10 páginas de 100 itens: é um limite de segurança para a requisição não
- * ficar presa num laço caso a API devolva sempre uma chave de continuação.
+ * POR QUE SÃO DUAS CONSULTAS, E NESTA ORDEM:
+ *
+ * A Tuya expõe dispositivos por dois caminhos, conforme a origem deles:
+ *
+ *   1. `/v1.0/iot-01/associated-users/devices` — dispositivos que chegaram
+ *      pelo vínculo com uma conta do app (Smart Life / Tuya Smart), feito em
+ *      "Devices → Link Tuya App Account". É o caso de quem já usava o app no
+ *      celular antes de criar o projeto, que é praticamente todo mundo.
+ *
+ *   2. `/v1.0/iot-03/devices` — dispositivos cadastrados DIRETAMENTE no
+ *      projeto da nuvem, sem passar pelo app. Comum em projetos industriais.
+ *
+ * O código consultava apenas o segundo. Numa conta com dezenas de dispositivos
+ * vindos do Smart Life, ele respondia com sucesso e uma lista vazia — o pior
+ * tipo de falha, porque parece que a conta é que está vazia. A tela então
+ * sugeria verificar o vínculo, que já estava correto.
+ *
+ * Consultamos o primeiro e, só se ele nada trouxer, o segundo. A ordem segue a
+ * frequência real: a maioria dos usuários vem pelo app.
  */
 router.get('/discover-devices', authMiddleware, asyncHandler(async (req, res) => {
   const config = await getUserTuya(req.user.email);
   const { tuya_access_id: ID, tuya_secret: SECRET, tuya_base_url: BASE } = config;
 
-  let allDevices = [];
-  let lastRowKey = '';
-  for (let page = 0; page < 10; page++) {
-    const url = `/v1.0/iot-03/devices?page_size=100${lastRowKey ? `&last_row_key=${lastRowKey}` : ''}`;
-    const result = await tuyaRequest('GET', url, ID, SECRET, BASE);
-    const list = result?.result?.devices || result?.result || [];
-    if (!Array.isArray(list) || list.length === 0) break;
-    allDevices = allDevices.concat(list);
-    if (!result?.result?.last_row_key) break; // não há próxima página
-    lastRowKey = result.result.last_row_key;
+  // 1. Dispositivos vindos da conta do app vinculada ao projeto.
+  let allDevices = await listarPaginado(
+    (chave) => `/v1.0/iot-01/associated-users/devices?page_size=100${chave ? `&last_row_key=${chave}` : ''}`,
+    ID, SECRET, BASE
+  );
+
+  // 2. Só se o primeiro caminho não trouxe nada: dispositivos do próprio projeto.
+  if (allDevices.length === 0) {
+    allDevices = await listarPaginado(
+      (chave) => `/v1.0/iot-03/devices?page_size=100${chave ? `&last_row_key=${chave}` : ''}`,
+      ID, SECRET, BASE
+    );
   }
 
   // Marca o que o usuário já cadastrou, para a tela desabilitar o botão "adicionar".

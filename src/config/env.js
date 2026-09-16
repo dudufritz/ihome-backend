@@ -15,7 +15,19 @@ const env = {
   isTest: process.env.NODE_ENV === 'test',
 
   // ── Banco de dados ──
-  databaseUrl: process.env.DATABASE_URL,
+  //
+  // Duas origens possíveis, nesta ordem:
+  //
+  //   DATABASE_URL — definida por nós, e a que vale se existir.
+  //
+  //   AZURE_POSTGRESQL_CONNECTIONSTRING — criada automaticamente pelo Azure
+  //   quando o App Service é provisionado junto com o banco. Ler o que a
+  //   plataforma já oferece evita manter a mesma credencial em dois lugares,
+  //   que é como as duas acabam divergindo.
+  //
+  // A ordem importa: quem configurou explicitamente quer aquele valor, não o
+  // que a plataforma achou por bem injetar.
+  databaseUrl: process.env.DATABASE_URL || process.env.AZURE_POSTGRESQL_CONNECTIONSTRING,
 
   // ── Autenticação (emitida pelo próprio iHome) ──
   // Segredo que assina e verifica os access tokens (HS256).
@@ -86,6 +98,19 @@ function checkEnv() {
 
   if (!env.databaseUrl) {
     console.error('❌ DATABASE_URL não definida — o servidor não conseguirá acessar o banco.');
+  } else if (!/^postgres(ql)?:\/\//.test(env.databaseUrl)) {
+    // O driver `pg` só entende URI. O Azure, dependendo de como o recurso foi
+    // criado, injeta a string no formato ADO.NET
+    // (`Server=...;Database=...;User Id=...;Password=...`), que o pg não lê —
+    // e a falha aparece só na primeira consulta, como "invalid connection
+    // string", longe da causa. Avisar no boot economiza essa caçada.
+    console.error(
+      '❌ A string de conexão não está no formato que o driver entende.\n' +
+      '   Esperado:  postgresql://usuario:senha@servidor:5432/banco?sslmode=require\n' +
+      '   Recebido:  um valor que não começa com postgres:// ou postgresql://\n' +
+      '   Se veio do Azure no formato "Server=...;Database=...", converta para\n' +
+      '   URI e grave em DATABASE_URL.'
+    );
   }
   if (!env.jwtSecret) {
     console.error('❌ JWT_SECRET não definida — nenhum login funcionará. Gere com: npm run gen:key');

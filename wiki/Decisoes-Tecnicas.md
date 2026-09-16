@@ -176,7 +176,7 @@ Registradas explicitamente. Conhecer os limites do próprio sistema vale mais do
 |---|---|---|
 | Agendamentos usam o fuso do servidor | Correto no Brasil, incorreto para usuário em outro fuso | Guardar o fuso de cada usuário |
 | `rejectUnauthorized: false` no SSL do banco | Protege contra escuta, não contra intermediário ativo | Validar a cadeia com o certificado da Azure |
-| Auditoria só cobre comandos | Compartilhamento e credenciais não são registrados | `recordAudit` já aceita qualquer `action` |
+| ~~Auditoria só cobre comandos~~ | Resolvido: convite, aceite, recusa, revogação, saída e troca de credencial passaram a ser registrados | — |
 | Rate limiting em memória | Com múltiplas instâncias, cada uma tem o próprio contador | Store compartilhado (Redis) |
 
 ## 14. Azure App Service — e a cota que é por região
@@ -230,3 +230,28 @@ O projeto estava fixado em `node:20-alpine`. Não quebrava nada, e é exatamente
 **Convite com prazo:** o token de compartilhamento agora expira em 7 dias. A validação vive dentro do próprio `UPDATE`, junto com `status = 'pending'`, o que torna o aceite atômico — dois cliques simultâneos no mesmo link resultam numa única aceitação.
 
 Token inexistente e token expirado dão **a mesma resposta**: distinguir os dois confirmaria a alguém que um token já existiu.
+
+---
+
+## 17. Migrar de plataforma não desliga a plataforma antiga
+
+**Decisão:** remover os GitHub Apps da Vercel e do Railway das contas, e não apenas parar de usá-los.
+
+**O que estava acontecendo:** a §11 deste documento registrava, desde a migração, que Railway e Vercel haviam sido abandonados. O código foi migrado, a documentação foi corrigida, o deploy passou a sair pelo Azure. E as duas integrações continuaram instaladas no GitHub — publicando a cada push, sem que ninguém pedisse.
+
+Só apareceu quando um Pull Request exibiu os checks:
+
+```
+Vercel – ihome — Deployment has completed
+Vercel – ihome-frontend — Deployment has completed
+Vercel – ihome-frontend-czji — Deployment has completed
+Vercel – ihome-frontend-v4yo — Deployment has completed
+```
+
+Quatro projetos, um deles criado por engano em alguma tentativa anterior, todos ativos.
+
+**Por que isso importa mais do que parece:** a linha de projeto marca Vercel e Railway como não utilizáveis. Não bastava deixar de usá-las — enquanto o app tivesse acesso ao repositório, o projeto *estava* sendo publicado nelas, e qualquer Pull Request mostrava isso em letras garrafais para quem abrisse.
+
+**A lição:** desinstalar é um passo separado de migrar, e é o único que o sistema não faz sozinho. Trocar de plataforma muda para onde o código vai; só remover a integração muda de onde ele *não* sai mais. Entre uma coisa e outra, os dois estados coexistiram por semanas sem nenhum sinal.
+
+**O que ficou:** apenas o SonarQubeCloud, que é usado pelo pipeline de análise estática e não faz deploy.

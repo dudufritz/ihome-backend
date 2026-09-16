@@ -31,6 +31,62 @@ function sha256(str) {
 const tokenCache = {};
 
 /**
+ * Nomes dos centros de dados da Tuya, para a mensagem de erro dizer em qual
+ * servidor a pergunta foi feita — e não apenas que ela falhou.
+ */
+const REGIOES = {
+  'https://openapi.tuyaus.com': 'Western America',
+  'https://openapi-ueaz.tuyaus.com': 'Eastern America',
+  'https://openapi.tuyaeu.com': 'Central Europe',
+  'https://openapi-weaz.tuyaeu.com': 'Western Europe',
+  'https://openapi.tuyacn.com': 'China',
+  'https://openapi.tuyain.com': 'India',
+};
+
+/**
+ * Traduz a resposta de erro da Tuya para uma frase acionável.
+ *
+ * POR QUE ISTO EXISTE: antes, a falha subia como o JSON cru da Tuya —
+ * `{"code":2009,"msg":"clientId is invalid","success":false}` — direto na tela
+ * do usuário. Além de ilegível, induzia ao erro: "clientId is invalid" parece
+ * credencial errada, quando na prática quase sempre significa que o Access ID
+ * está certo mas foi perguntado no centro de dados errado. A pessoa ficava
+ * regerando credenciais que já funcionavam.
+ *
+ * Os códigos vêm da documentação da Tuya. Quando não reconhecemos um, ainda
+ * devolvemos a mensagem original — perder informação seria pior que mostrá-la.
+ */
+function explicarErroTuya(resposta, baseUrl) {
+  const regiao = REGIOES[baseUrl] || baseUrl;
+  const codigo = resposta?.code;
+  const original = resposta?.msg || JSON.stringify(resposta);
+
+  const explicacoes = {
+    // O Access ID não existe NESTE centro de dados. Cada projeto Tuya vive em
+    // um só, e o ID não é reconhecido fora dele.
+    2009: `O Access ID não foi reconhecido no servidor "${regiao}". `
+        + 'Confira em platform.tuya.com → Cloud → Development → seu projeto → Overview '
+        + 'qual é o Data Center, e selecione a mesma região em Configurações.',
+    // Assinatura inválida: o Access ID existe, o segredo não confere.
+    1004: `O Access Secret não confere com o Access ID no servidor "${regiao}". `
+        + 'Copie os dois novamente do painel da Tuya, sem espaços nas pontas.',
+    // Permissão de API não habilitada no projeto.
+    1106: 'O projeto na Tuya não tem permissão para esta API. '
+        + 'Em platform.tuya.com → seu projeto → Service API, habilite '
+        + '"IoT Core" e "Authorization Token Management".',
+    // Nenhum dispositivo vinculado — não é erro de credencial.
+    1100: 'Nenhum dispositivo vinculado ao projeto. '
+        + 'Em platform.tuya.com → seu projeto → Devices → Link Tuya App Account, '
+        + 'escaneie o QR code pelo app Smart Life.',
+  };
+
+  const explicacao = explicacoes[codigo];
+  return explicacao
+    ? `${explicacao} (Tuya: ${codigo} — ${original})`
+    : `Falha ao autenticar na Tuya no servidor "${regiao}": ${original} (código ${codigo})`;
+}
+
+/**
  * Obtém um token de acesso, reaproveitando o do cache quando ainda válido.
  * Guardamos a expiração com 60s de margem para nunca usar um token que
  * vence no meio do caminho.
@@ -53,7 +109,7 @@ async function getToken(accessId, accessSecret, baseUrl) {
     },
   });
   if (!res.data.success) {
-    throw new Error('Falha ao autenticar na Tuya: ' + JSON.stringify(res.data));
+    throw new Error(explicarErroTuya(res.data, baseUrl));
   }
 
   tokenCache[accessId] = {
@@ -119,4 +175,7 @@ async function getUserTuya(email) {
   return { ...config, tuya_secret: decrypt(config.tuya_secret) };
 }
 
-module.exports = { makeSign, sha256, getToken, tuyaRequest, getUserTuya, tokenCache };
+module.exports = {
+  makeSign, sha256, getToken, tuyaRequest, getUserTuya, tokenCache,
+  explicarErroTuya, REGIOES,
+};
