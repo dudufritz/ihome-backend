@@ -9,6 +9,10 @@ process.env.VAPID_PRIVATE_KEY = '';
 // de chamar o modelo. Como estes testes exercitam justamente o caminho do
 // Gemini (com axios mockado), a chave precisa existir no ambiente de teste.
 process.env.GEMINI_API_KEY = 'test-gemini-key';
+// Modelo fixado: com GEMINI_MODEL definido, o serviço não vai à rede perguntar
+// quais modelos existem. Estes testes exercitam as AÇÕES do assistente, não a
+// descoberta — que tem suíte própria em ai-modelo.test.js.
+process.env.GEMINI_MODEL = 'gemini-2.5-flash';
 
 const mockQuery = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
 jest.mock('pg', () => {

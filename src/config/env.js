@@ -69,7 +69,10 @@ const env = {
 
   // ── Assistente de IA (Google Gemini) ──
   geminiApiKey: process.env.GEMINI_API_KEY,
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  // Sem valor padrão de propósito: quando não definido, o serviço pergunta ao
+  // Google quais modelos a chave alcança e escolhe um. Fixar um nome aqui foi
+  // o que quebrou o assistente quando o gemini-1.5-flash foi aposentado.
+  geminiModel: process.env.GEMINI_MODEL || null,
 
   // ── CORS ──
   // Origens extras além do frontendUrl (ambientes de preview, por exemplo).
