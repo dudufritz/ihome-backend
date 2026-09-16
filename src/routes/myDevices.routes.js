@@ -42,17 +42,64 @@ router.get('/my-devices', authMiddleware, asyncHandler(async (req, res) => {
   res.json([...own.rows, ...shared.rows]);
 }));
 
-/** POST /my-devices — traz um dispositivo da conta Tuya para o iHome. */
+/**
+ * POST /my-devices — traz um dispositivo da conta Tuya para o iHome.
+ *
+ * A categoria vem da descoberta e é guardada: é o que permite a tela saber
+ * que um sensor de presença não é um interruptor. Antes ela era descartada,
+ * e todo aparelho acabava exibido com botão de ligar.
+ */
 router.post('/my-devices', authMiddleware, asyncHandler(async (req, res) => {
-  const { tuya_id, name, room } = req.body;
+  const { tuya_id, name, room, category } = req.body;
   if (!tuya_id || !name) {
     return res.status(400).json({ error: 'ID do dispositivo e nome são obrigatórios' });
   }
 
   const result = await pool.query(
-    'INSERT INTO user_devices (user_email, tuya_id, name, room) VALUES ($1, $2, $3, $4) RETURNING *',
-    [req.user.email, tuya_id, name, room || '']
+    `INSERT INTO user_devices (user_email, tuya_id, name, room, category)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [req.user.email, tuya_id, String(name).trim(), (room || '').trim(), category || '']
   );
+  res.json(result.rows[0]);
+}));
+
+/**
+ * PUT /my-devices/:id — renomeia o dispositivo ou muda o cômodo.
+ *
+ * O nome que vem da Tuya costuma ser o que o instalador digitou às pressas
+ * ("Interruptor 3"), e o cômodo chega vazio quando o dispositivo é adicionado
+ * em lote. Sem esta rota, a única forma de corrigir era remover e cadastrar de
+ * novo — o que apagava os agendamentos ligados àquele dispositivo.
+ *
+ * `AND user_email = $4` mantém o mesmo padrão das outras rotas com id: quem
+ * tentar editar dispositivo alheio não encontra a linha, e recebe 404.
+ */
+router.put('/my-devices/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const { name, room } = req.body;
+
+  if (name !== undefined && !String(name).trim()) {
+    return res.status(400).json({ error: 'O nome não pode ficar vazio' });
+  }
+
+  // COALESCE deixa o cliente enviar só o campo que mudou: o que vier como
+  // null permanece com o valor atual, em vez de ser apagado por omissão.
+  const result = await pool.query(
+    `UPDATE user_devices
+        SET name = COALESCE($1, name),
+            room = COALESCE($2, room)
+      WHERE id = $3 AND user_email = $4
+      RETURNING *`,
+    [
+      name !== undefined ? String(name).trim() : null,
+      room !== undefined ? String(room).trim() : null,
+      req.params.id,
+      req.user.email,
+    ]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ error: 'Dispositivo não encontrado' });
+  }
   res.json(result.rows[0]);
 }));
 
