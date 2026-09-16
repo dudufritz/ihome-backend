@@ -106,6 +106,10 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
   // dispositivo — justamente no caso em que saber qual dispositivo falhou
   // é o que mais importa.
   let deviceName = null;
+  // O cômodo entra no registro pelo mesmo motivo do nome. Numa instalação
+  // real, "Interruptor 3" não diz nada: o instalador coloca vários iguais na
+  // mesma casa, e quem lê a auditoria precisa saber ONDE a ação aconteceu.
+  let deviceRoom = null;
 
   try {
     // ── 1. Autorização ──
@@ -119,10 +123,11 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // Falha aqui não impede nada: o nome é informação acessória.
     try {
       const dev = await pool.query(
-        'SELECT name FROM user_devices WHERE user_email = $1 AND tuya_id = $2 LIMIT 1',
+        'SELECT name, room FROM user_devices WHERE user_email = $1 AND tuya_id = $2 LIMIT 1',
         [homeOwner, deviceId]
       );
       deviceName = dev.rows[0]?.name || null;
+      deviceRoom = dev.rows[0]?.room || null;
     } catch { /* nome é opcional */ }
 
     if (!acesso.allowed) {
@@ -131,7 +136,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
       // tentativas negadas — que são justamente as que mais interessam.
       await recordAudit(req, {
         homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-        details: { commands, summary: describeCommands(commands) },
+        details: { commands, summary: describeCommands(commands), room: deviceRoom },
         result: 'denied', errorMessage: acesso.reason,
       });
       return res.status(acesso.status || 403).json({ error: acesso.reason });
@@ -151,7 +156,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // ── 4. Auditoria (sucesso) ──
     await recordAudit(req, {
       homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-      details: { commands, summary: describeCommands(commands) },
+      details: { commands, summary: describeCommands(commands), room: deviceRoom },
       result: 'success',
     });
 
@@ -160,7 +165,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // ── 4. Auditoria (falha) ──
     await recordAudit(req, {
       homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-      details: { commands, summary: describeCommands(commands) },
+      details: { commands, summary: describeCommands(commands), room: deviceRoom },
       result: 'error', errorMessage: err.message,
     });
     res.status(500).json({ error: err.message });

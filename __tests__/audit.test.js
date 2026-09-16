@@ -78,7 +78,7 @@ function auditInserts() {
 // credenciais, porque o nome tambem precisa constar no registro de uma
 // tentativa negada — que acontece antes de qualquer chamada a Tuya.
 function mockTuyaOk() {
-  mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Lampada da Sala' }], rowCount: 1 }); // nome
+  mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Lampada da Sala', room: 'Sala' }], rowCount: 1 }); // nome e comodo
   mockQuery.mockResolvedValueOnce({
     rows: [{ tuya_access_id: 'acc', tuya_secret: 'sec', tuya_base_url: 'https://openapi.tuyaus.com' }],
     rowCount: 1,
@@ -128,7 +128,7 @@ describe('Auditoria — gravacao no comando de dispositivo', () => {
     // Regressao encontrada rodando contra Postgres real: deviceName era
     // declarado dentro do try, entao o catch nao o enxergava e o registro
     // de erro saia sem o nome — justamente quando ele mais importa.
-    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Lampada da Sala' }], rowCount: 1 }); // nome
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Lampada da Sala', room: 'Sala' }], rowCount: 1 }); // nome e comodo
     mockQuery.mockResolvedValueOnce({
       rows: [{ tuya_access_id: 'acc', tuya_secret: 'sec', tuya_base_url: 'https://openapi.tuyaus.com' }],
       rowCount: 1,
@@ -366,5 +366,46 @@ describe('purgeAuditLog', () => {
   test('erro no expurgo nao propaga excecao', async () => {
     mockQuery.mockRejectedValueOnce(new Error('sem conexao'));
     await expect(purgeAuditLog()).resolves.toBeUndefined();
+  });
+});
+
+// ── COMODO NO REGISTRO ────────────────────────────────────────
+describe('Auditoria — comodo do dispositivo', () => {
+  // Pedido de quem usa o sistema numa empresa de instalacao: "como a gente
+  // instala varios iguais na mesma casa, 'Interruptor 3' nao me diz onde foi".
+  test('grava o comodo junto da acao', async () => {
+    mockTuyaOk();
+    await request(app)
+      .post('/devices/dev-1/command')
+      .set('Authorization', `Bearer ${tok()}`)
+      .send({ commands: [{ code: 'switch_1', value: true }] })
+      .expect(200);
+
+    const [, params] = auditInserts()[0];
+    const details = JSON.parse(params[5]);
+    expect(details.room).toBe('Sala');
+  });
+
+  test('dispositivo sem comodo nao quebra o registro', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Sensor', room: '' }], rowCount: 1 });
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tuya_access_id: 'acc', tuya_secret: 'sec', tuya_base_url: 'https://openapi.tuyaus.com' }],
+      rowCount: 1,
+    });
+    axios.get.mockResolvedValueOnce({
+      data: { success: true, result: { access_token: 'test-token', expire_time: 7200 } },
+    });
+    axios.mockResolvedValueOnce({ data: { success: true, result: {} } });
+
+    await request(app)
+      .post('/devices/dev-1/command')
+      .set('Authorization', `Bearer ${tok()}`)
+      .send({ commands: [{ code: 'switch_1', value: true }] })
+      .expect(200);
+
+    const [, params] = auditInserts()[0];
+    const details = JSON.parse(params[5]);
+    expect(details.room).toBeNull();
+    expect(details.summary).toBeDefined();   // o resto do registro segue inteiro
   });
 });
