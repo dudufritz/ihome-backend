@@ -75,9 +75,19 @@ router.get('/audit-log', authMiddleware, asyncHandler(async (req, res) => {
   }
   if (q) {
     params.push(`%${q}%`);
-    const i = params.length; // o mesmo parâmetro é reaproveitado nos 4 campos
+    const i = params.length; // o mesmo parâmetro é reaproveitado nos 5 campos
+    // O cômodo entrou na busca depois que o demandante explicou COMO usa a
+    // tela: "nas tentativas negadas e nas falhas, precisamos identificar
+    // rapidamente onde ocorreu a ação". O cômodo já aparecia na linha, mas não
+    // era pesquisável — dava para vê-lo e não para procurá-lo, que numa casa
+    // com dezenas de aparelhos é a diferença entre achar e rolar a lista.
+    //
+    // details->>'room' e não um JOIN com user_devices, pela mesma razão de
+    // sempre aqui: buscar pelo cadastro atual encontraria registros pelo
+    // cômodo de HOJE, e não pelo cômodo de quando o fato aconteceu.
     where += ` AND (device_name ILIKE $${i} OR actor_email ILIKE $${i}
-                    OR device_id ILIKE $${i} OR details->>'summary' ILIKE $${i})`;
+                    OR device_id ILIKE $${i} OR details->>'summary' ILIKE $${i}
+                    OR details->>'room' ILIKE $${i})`;
   }
 
   // Total sem paginação, para a tela mostrar "1–50 de 320".

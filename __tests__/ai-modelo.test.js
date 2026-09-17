@@ -115,15 +115,95 @@ describe('Escolha do modelo', () => {
   });
 });
 
-describe('Erros do Gemini chegam legíveis', () => {
-  test('404 do modelo diz qual modelo falhou', async () => {
+/**
+ * Listar não é o mesmo que poder usar.
+ *
+ * Isto quebrou em produção depois de a descoberta já estar no ar: o Google
+ * LISTOU `gemini-2.5-flash` como suportando generateContent e respondeu 404
+ * quando o comando foi de fato enviado. A primeira versão tratava a listagem
+ * como promessa de acesso; não é. Chave de camada gratuita e restrição por
+ * região produzem exatamente essa diferença.
+ */
+describe('Modelo listado que recusa a chamada', () => {
+  const um404 = { response: { status: 404, data: {} } };
+
+  test('passa para o próximo candidato em vez de desistir', async () => {
     const { axios: ax, interpretCommand: fn } = moduloLimpo();
-    ax.get.mockResolvedValueOnce(listaDeModelos(['gemini-2.5-flash']));
-    ax.post.mockRejectedValueOnce({ response: { status: 404, data: {} } });
+    ax.get.mockResolvedValueOnce(listaDeModelos(['gemini-2.5-flash', 'gemini-2.5-flash-lite']));
+    ax.post
+      .mockRejectedValueOnce(um404)                                    // flash recusa
+      .mockResolvedValueOnce({ data: { candidates: [{ content: { parts: [{
+        text: '{"action":"control","deviceId":"d1","state":true,"message":"Ligando"}',
+      }] } }] } });                                                    // lite atende
 
     await expect(fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz'))
-      .rejects.toThrow(/gemini-2\.5-flash.*não está disponível/i);
+      .resolves.toMatchObject({ action: 'control', deviceId: 'd1' });
+
+    // Confirma que a segunda chamada usou o OUTRO modelo, e não repetiu o primeiro.
+    expect(ax.post.mock.calls[0][0]).toMatch(/gemini-2\.5-flash:/);
+    expect(ax.post.mock.calls[1][0]).toMatch(/gemini-2\.5-flash-lite:/);
   });
+
+  test('não insiste num modelo que já recusou', async () => {
+    // Sem esta memória, todo comando pagaria de novo o 404 do preferido —
+    // uma ida à rede inútil na frente de cada resposta ao usuário.
+    const { axios: ax, interpretCommand: fn } = moduloLimpo();
+    ax.get.mockResolvedValueOnce(listaDeModelos(['gemini-2.5-flash', 'gemini-2.5-pro']));
+    const ok = { data: { candidates: [{ content: { parts: [{
+      text: '{"action":"list","message":"ok"}',
+    }] } }] } };
+    ax.post
+      .mockRejectedValueOnce(um404)   // 1o comando: flash recusa
+      .mockResolvedValueOnce(ok)      // 1o comando: pro atende
+      .mockResolvedValueOnce(ok);     // 2o comando: vai direto no pro
+
+    await fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz');
+    await fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz');
+
+    expect(ax.post).toHaveBeenCalledTimes(3);
+    expect(ax.post.mock.calls[2][0]).toMatch(/gemini-2\.5-pro:/);
+  });
+
+  test('todos recusando dá erro que nomeia o que foi tentado', async () => {
+    // A mensagem tem que dizer o que foi testado: sem isso, quem configurou a
+    // chave não sabe se o problema é o modelo, a chave ou a API desabilitada.
+    const { axios: ax, interpretCommand: fn } = moduloLimpo();
+    ax.get.mockResolvedValueOnce(listaDeModelos(['gemini-2.5-flash', 'gemini-2.5-pro']));
+    ax.post.mockRejectedValue(um404);
+
+    await expect(fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz'))
+      .rejects.toThrow(/gemini-2\.5-flash.*gemini-2\.5-pro/);
+  });
+
+  test('para depois de poucas tentativas, sem varrer o catálogo', async () => {
+    // Cada tentativa é uma ida à rede com o usuário esperando.
+    const { axios: ax, interpretCommand: fn } = moduloLimpo();
+    ax.get.mockResolvedValueOnce(listaDeModelos([
+      'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
+      'gemini-2.0-flash', 'gemini-1.0-pro',
+    ]));
+    ax.post.mockRejectedValue(um404);
+
+    await expect(fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz')).rejects.toThrow();
+    expect(ax.post.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  test('erro que não é 404 não vira tentativa extra', async () => {
+    // Repetir não resolve cota estourada nem chave inválida: só faria o
+    // usuário esperar mais para ver a mesma mensagem.
+    const { axios: ax, interpretCommand: fn } = moduloLimpo();
+    ax.get.mockResolvedValueOnce(listaDeModelos(['gemini-2.5-flash', 'gemini-2.5-pro']));
+    ax.post.mockRejectedValueOnce({
+      response: { status: 429, data: { error: { message: 'Quota exceeded' } } },
+    });
+
+    await expect(fn([{ name: 'Luz', tuya_id: 'd1' }], 'liga a luz'))
+      .rejects.toThrow(/Quota exceeded/);
+    expect(ax.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Erros do Gemini chegam legíveis', () => {
 
   test('mensagem do Google é repassada em vez de engolida', async () => {
     const { axios: ax, interpretCommand: fn } = moduloLimpo();
