@@ -29,6 +29,10 @@ function asyncHandler(handler) {
  * X-Forwarded-For, no formato "cliente, proxy1, proxy2" — interessa o primeiro.
  */
 function clientIp(req) {
+  // Ação automática (rotina agendada, monitor) não tem requisição nenhuma.
+  // Devolver null é o registro correto: não houve cliente, e inventar um IP
+  // de servidor faria a auditoria parecer que alguém agiu de fora.
+  if (!req) return null;
   const forwarded = req.headers?.['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.length > 0) {
     return forwarded.split(',')[0].trim();

@@ -136,7 +136,19 @@ async function descobrirModelo() {
     throw new Error('Nenhum modelo do Gemini disponível para esta chave de API.');
   }
 
-  console.log(`🤖 Assistente usando o modelo ${escolhido}`);
+  // SEM console.log AQUI, DE PROPÓSITO.
+  //
+  // Havia uma linha imprimindo "Assistente usando o modelo X". O @pdrollucas
+  // pediu a remoção no review do PR #2. O motivo que ele deu — usuário não
+  // abre o devtools — não se aplica exatamente: isto é backend, e a saída iria
+  // para o log stream do App Service, não para o navegador.
+  //
+  // Mas a conclusão vale, por outro motivo: o log só apareceria no caminho em
+  // que TUDO DEU CERTO, onde ninguém vai olhar. Quem precisa saber qual modelo
+  // está em uso é quem está investigando uma falha — e nesse caminho o nome já
+  // vai na mensagem de erro (o 404 abaixo diz qual modelo não está disponível).
+  // Um log de sucesso que ninguém lê é ruído: some no meio das requisições e dá
+  // a impressão falsa de que o sistema está sendo observado.
   modeloEmUso = escolhido;
   return escolhido;
 }
