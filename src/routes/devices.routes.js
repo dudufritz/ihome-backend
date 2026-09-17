@@ -41,19 +41,41 @@ router.get('/devices', authMiddleware, asyncHandler(async (req, res) => {
   );
 
   const list = await Promise.all(devResult.rows.map(async (d) => {
-    // Campos comuns aos dois desfechos (online e offline)
+    // Campos comuns aos dois desfechos (online e offline).
+    //
+    // `isControllable` começa falso de propósito. Antes era fixo em `true`,
+    // e a tela exibia botão de ligar até em sensor de presença — que só
+    // informa estado e não aceita comando. Clicar não fazia nada, e o usuário
+    // não tinha como saber se o aparelho estava quebrado ou se o app é que era.
     const base = {
       id: d.tuya_id, dbId: d.id, name: d.name,
-      category_name: 'Switch', room: d.room, isControllable: true,
+      category_name: d.category || '', room: d.room, isControllable: false,
     };
     try {
       const s = await tuyaRequest('GET', `/v1.0/iot-03/devices/${d.tuya_id}/status`, ID, SECRET, BASE);
       // A Tuya devolve [{code,value},...]; viramos num objeto para consulta direta.
       const statusMap = {};
       (s?.result || []).forEach((item) => { statusMap[item.code] = item.value; });
-      return { ...base, online: true, switch_1: statusMap.switch_1 === true };
+
+      // Quem decide se o aparelho é controlável é o próprio aparelho: se ele
+      // reporta um código de interruptor, aceita comando. Perguntar ao
+      // dispositivo funciona para modelos que ainda nem existem — uma lista
+      // de categorias nossa começaria desatualizada.
+      const codigoDeLiga = ['switch_1', 'switch', 'switch_led'].find((c) => c in statusMap);
+
+      return {
+        ...base,
+        online: true,
+        isControllable: Boolean(codigoDeLiga),
+        // Guardamos QUAL código liga este aparelho: nem todos usam switch_1,
+        // e mandar o código errado faz a Tuya aceitar a chamada sem efeito.
+        switchCode: codigoDeLiga || null,
+        switch_1: codigoDeLiga ? statusMap[codigoDeLiga] === true : false,
+      };
     } catch {
-      return { ...base, online: false, switch_1: false };
+      // Offline: não dá para saber o que ele aceita, então não oferecemos
+      // botão. Prometer um controle que pode não existir é pior que omitir.
+      return { ...base, online: false, switchCode: null, switch_1: false };
     }
   }));
 
@@ -84,6 +106,10 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
   // dispositivo — justamente no caso em que saber qual dispositivo falhou
   // é o que mais importa.
   let deviceName = null;
+  // O cômodo entra no registro pelo mesmo motivo do nome. Numa instalação
+  // real, "Interruptor 3" não diz nada: o instalador coloca vários iguais na
+  // mesma casa, e quem lê a auditoria precisa saber ONDE a ação aconteceu.
+  let deviceRoom = null;
 
   try {
     // ── 1. Autorização ──
@@ -97,10 +123,11 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // Falha aqui não impede nada: o nome é informação acessória.
     try {
       const dev = await pool.query(
-        'SELECT name FROM user_devices WHERE user_email = $1 AND tuya_id = $2 LIMIT 1',
+        'SELECT name, room FROM user_devices WHERE user_email = $1 AND tuya_id = $2 LIMIT 1',
         [homeOwner, deviceId]
       );
       deviceName = dev.rows[0]?.name || null;
+      deviceRoom = dev.rows[0]?.room || null;
     } catch { /* nome é opcional */ }
 
     if (!acesso.allowed) {
@@ -109,7 +136,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
       // tentativas negadas — que são justamente as que mais interessam.
       await recordAudit(req, {
         homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-        details: { commands, summary: describeCommands(commands) },
+        details: { commands, summary: describeCommands(commands), room: deviceRoom },
         result: 'denied', errorMessage: acesso.reason,
       });
       return res.status(acesso.status || 403).json({ error: acesso.reason });
@@ -129,7 +156,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // ── 4. Auditoria (sucesso) ──
     await recordAudit(req, {
       homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-      details: { commands, summary: describeCommands(commands) },
+      details: { commands, summary: describeCommands(commands), room: deviceRoom },
       result: 'success',
     });
 
@@ -138,7 +165,7 @@ router.post('/devices/:id/command', authMiddleware, asyncHandler(async (req, res
     // ── 4. Auditoria (falha) ──
     await recordAudit(req, {
       homeOwnerEmail: homeOwner, action: 'device.command', deviceId, deviceName,
-      details: { commands, summary: describeCommands(commands) },
+      details: { commands, summary: describeCommands(commands), room: deviceRoom },
       result: 'error', errorMessage: err.message,
     });
     res.status(500).json({ error: err.message });

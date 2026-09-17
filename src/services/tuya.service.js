@@ -152,7 +152,17 @@ async function tuyaRequest(method, path, accessId, accessSecret, baseUrl, body =
     data: body || undefined,
   });
 
-  console.log(`${method} ${path} — ok`);
+  // SEM log de sucesso aqui.
+  //
+  // Havia um `console.log` por chamada. Este é o caminho de TODA conversa com
+  // a Tuya: o app consulta o estado dos dispositivos a cada 30 segundos e o
+  // monitor varre todos a cada 5 minutos. Com 38 aparelhos, isso passava de
+  // mil linhas "ok" por hora — o suficiente para esconder as mensagens de erro
+  // que realmente precisam ser vistas no log do App Service.
+  //
+  // Mesma conclusão do review do @pdrollucas no PR #2: log de caminho feliz
+  // atrapalha em vez de informar. As falhas continuam aparecendo, via
+  // explicarErroTuya, e as ações ficam registradas na auditoria.
   return res.data;
 }
 

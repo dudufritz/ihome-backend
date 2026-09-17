@@ -33,7 +33,9 @@ const RESULTADOS = ['success', 'error', 'denied'];
  * log, o usuário não pode receber erro por uma luz que de fato acendeu.
  * A falha é registrada no console e o fluxo segue.
  *
- * @param {import('express').Request} req requisição (para extrair ator, IP e user-agent)
+ * @param {import('express').Request|null} req requisição (para extrair ator, IP
+ *   e user-agent). Aceita null: ações automáticas — rotina agendada, monitor —
+ *   acontecem sem ninguém pedir, e precisam ser auditadas do mesmo jeito.
  * @param {object} dados descrição da ação
  * @param {string} [dados.actorEmail] quem agiu, quando não há sessão autenticada
  */
@@ -58,7 +60,7 @@ async function recordAudit(req, {
     // Sem ator, sem casa ou sem ação não há o que registrar de útil.
     if (!actor || !homeOwnerEmail || !action) return;
 
-    const ua = req.headers?.['user-agent'] || null;
+    const ua = req?.headers?.['user-agent'] || null;
 
     await pool.query(
       `INSERT INTO audit_log

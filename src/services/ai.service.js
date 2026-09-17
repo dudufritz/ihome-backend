@@ -88,20 +88,105 @@ function parseModelResponse(rawText) {
  * @param {Array} devices dispositivos do usuário (contexto do prompt)
  * @param {string} command texto digitado pelo usuário
  */
+const BASE_GEMINI = 'https://generativelanguage.googleapis.com/v1beta';
+
+/**
+ * Modelo escolhido, guardado depois da primeira descoberta.
+ * A lista do Google não muda durante a execução do processo, e consultá-la a
+ * cada comando somaria uma ida à rede a algo que o usuário está esperando.
+ */
+let modeloEmUso = null;
+
+/**
+ * Descobre qual modelo usar perguntando ao Google quais existem.
+ *
+ * POR QUE NÃO FIXAR O NOME NO CÓDIGO: o projeto estava fixado em
+ * `gemini-1.5-flash`. O Google aposentou esse modelo, e chaves criadas depois
+ * disso simplesmente não têm acesso a ele — a API responde 404. O assistente
+ * parou de funcionar sem que nada no iHome tivesse mudado, e o sintoma era
+ * um "não consegui processar o comando" que não dizia nada.
+ *
+ * Perguntar qual modelo existe, em vez de presumir, faz o problema não
+ * voltar quando o próximo for aposentado.
+ *
+ * A preferência é por "flash": a tarefa aqui é classificação estruturada com
+ * saída curta, não geração criativa. Um modelo maior custaria mais caro e
+ * responderia mais devagar pelo mesmo resultado.
+ */
+async function descobrirModelo() {
+  // Nome explícito na configuração vence a descoberta: quem definiu
+  // GEMINI_MODEL quer aquele modelo, não o que acharmos melhor.
+  if (env.geminiModel) return env.geminiModel;
+  if (modeloEmUso) return modeloEmUso;
+
+  const { data } = await axios.get(`${BASE_GEMINI}/models?key=${env.geminiApiKey}`);
+
+  const candidatos = (data.models || [])
+    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map((m) => m.name.replace(/^models\//, ''))
+    // Versões de preview mudam sem aviso; ficamos com as estáveis.
+    .filter((n) => !/preview|exp|thinking/i.test(n));
+
+  const escolhido =
+    candidatos.find((n) => /flash/i.test(n) && !/lite/i.test(n)) ||
+    candidatos.find((n) => /flash/i.test(n)) ||
+    candidatos[0];
+
+  if (!escolhido) {
+    throw new Error('Nenhum modelo do Gemini disponível para esta chave de API.');
+  }
+
+  // SEM console.log AQUI, DE PROPÓSITO.
+  //
+  // Havia uma linha imprimindo "Assistente usando o modelo X". O @pdrollucas
+  // pediu a remoção no review do PR #2. O motivo que ele deu — usuário não
+  // abre o devtools — não se aplica exatamente: isto é backend, e a saída iria
+  // para o log stream do App Service, não para o navegador.
+  //
+  // Mas a conclusão vale, por outro motivo: o log só apareceria no caminho em
+  // que TUDO DEU CERTO, onde ninguém vai olhar. Quem precisa saber qual modelo
+  // está em uso é quem está investigando uma falha — e nesse caminho o nome já
+  // vai na mensagem de erro (o 404 abaixo diz qual modelo não está disponível).
+  // Um log de sucesso que ninguém lê é ruído: some no meio das requisições e dá
+  // a impressão falsa de que o sistema está sendo observado.
+  modeloEmUso = escolhido;
+  return escolhido;
+}
+
 async function interpretCommand(devices, command) {
   if (!env.geminiApiKey) {
     throw new Error('Assistente de IA indisponível: GEMINI_API_KEY não configurada.');
   }
 
-  const resposta = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiModel}:generateContent?key=${env.geminiApiKey}`,
-    {
-      contents: [{ parts: [{ text: buildPrompt(devices, command) }] }],
-      generationConfig: { temperature: 0.1 },
-    }
-  );
+  const modelo = await descobrirModelo();
 
-  const rawText = resposta.data.candidates[0].content.parts[0].text.trim();
+  let resposta;
+  try {
+    resposta = await axios.post(
+      `${BASE_GEMINI}/models/${modelo}:generateContent?key=${env.geminiApiKey}`,
+      {
+        contents: [{ parts: [{ text: buildPrompt(devices, command) }] }],
+        generationConfig: { temperature: 0.1 },
+      }
+    );
+  } catch (err) {
+    // O modelo guardado pode ter sido aposentado enquanto o processo roda.
+    // Esquecemos a escolha para que a próxima tentativa descubra de novo.
+    if (err.response?.status === 404) {
+      modeloEmUso = null;
+      throw new Error(`O modelo "${modelo}" não está disponível para esta chave de API.`);
+    }
+    // A mensagem do Google diz o que houve — chave inválida, cota estourada,
+    // API não habilitada. Repassá-la evita o "tente novamente" que não ajuda.
+    const detalhe = err.response?.data?.error?.message;
+    throw new Error(detalhe ? `Gemini: ${detalhe}` : err.message);
+  }
+
+  const rawText = resposta.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!rawText) {
+    // Acontece quando o filtro de segurança do Google bloqueia a resposta.
+    throw new Error('O modelo não devolveu resposta para este comando.');
+  }
   return parseModelResponse(rawText);
 }
 
@@ -119,4 +204,7 @@ function resolveDevice(devices, deviceId) {
   return devices.find((d) => d.tuya_id === deviceId) || null;
 }
 
-module.exports = { interpretCommand, resolveDevice, buildPrompt, parseModelResponse, ACOES_VALIDAS };
+module.exports = {
+  interpretCommand, resolveDevice, buildPrompt, parseModelResponse,
+  descobrirModelo, ACOES_VALIDAS,
+};

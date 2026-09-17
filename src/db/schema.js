@@ -161,6 +161,11 @@ async function initDB() {
       UNIQUE(owner_email, guest_email)
     )
   `);
+  // A categoria que a Tuya informa (dj = lâmpada, cz = tomada, pir = sensor
+  // de presença...). Era descartada na hora de salvar, e a tela então tratava
+  // todo aparelho como interruptor — sensor aparecia com botão de ligar.
+  await pool.query(`ALTER TABLE user_devices ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''`);
+
   // Migrações para bases criadas antes destas colunas existirem
   await pool.query(`ALTER TABLE home_shares ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`);
   await pool.query(`ALTER TABLE home_shares ADD COLUMN IF NOT EXISTS invite_token TEXT`);
