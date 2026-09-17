@@ -311,6 +311,34 @@ describe('GET /audit-log', () => {
     expect(sel[1]).toContain('%sala%');
   });
 
+  // O comodo entrou na busca depois do retorno do demandante: ele explicou
+  // que le esta tela para descobrir ONDE algo aconteceu, principalmente nas
+  // tentativas negadas e nas falhas. O comodo ja aparecia na linha, mas nao
+  // era pesquisavel - dava para ve-lo e nao para procura-lo.
+  test('busca textual tambem procura no comodo', async () => {
+    await request(app).get('/audit-log?q=quarto').set('Authorization', `Bearer ${tok()}`);
+    const sel = mockQuery.mock.calls.find(c => /FROM audit_log/i.test(c[0]));
+    expect(sel[0]).toMatch(/details->>'room' ILIKE/);
+  });
+
+  test('a busca do comodo usa o valor gravado, nao o cadastro atual', async () => {
+    // Um JOIN com user_devices encontraria registros pelo comodo de HOJE.
+    // Mover um aparelho de lugar mudaria o resultado de buscas sobre o
+    // passado - que e exatamente o que um registro de auditoria nao pode fazer.
+    await request(app).get('/audit-log?q=quarto').set('Authorization', `Bearer ${tok()}`);
+    const sel = mockQuery.mock.calls.find(c => /FROM audit_log/i.test(c[0]));
+    expect(sel[0]).not.toMatch(/JOIN user_devices/i);
+  });
+
+  test('um unico parametro serve aos cinco campos da busca', async () => {
+    // Se cada campo empurrasse o proprio parametro, a numeracao dos $n
+    // seguintes sairia do lugar e os filtros de data cairiam no argumento
+    // errado - o tipo de bug que so aparece combinando filtros.
+    await request(app).get('/audit-log?q=quarto').set('Authorization', `Bearer ${tok()}`);
+    const sel = mockQuery.mock.calls.find(c => /FROM audit_log/i.test(c[0]));
+    expect(sel[1].filter(v => v === '%quarto%')).toHaveLength(1);
+  });
+
   test('limit e limitado a 500', async () => {
     const r = await request(app).get('/audit-log?limit=99999')
       .set('Authorization', `Bearer ${tok()}`);
