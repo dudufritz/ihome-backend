@@ -74,6 +74,29 @@ describe('Rotas públicas de diagnóstico', () => {
     );
   });
 
+  test('e-mail só conta como pronto com as DUAS variáveis', async () => {
+    // Antes bastava GMAIL_USER para o campo virar true. Configurar só o
+    // endereço e esquecer a senha de app é o erro mais provável dos dois: o
+    // endereço se sabe de cabeça, a senha precisa ser gerada numa outra tela
+    // do Google. O diagnóstico dizia "pronto" e o convite falhava no envio —
+    // exatamente a falha silenciosa que esta rota existe para evitar.
+    jest.resetModules();
+    process.env.GMAIL_USER = 'ihome@example.com';
+    delete process.env.GMAIL_APP_PASSWORD;
+    const appSoUsuario = require('../index').app;
+    const r1 = await request(appSoUsuario).get('/health');
+    expect(r1.body.config.email).toBe(false);
+
+    jest.resetModules();
+    process.env.GMAIL_APP_PASSWORD = 'senha-de-app-de-teste';
+    const appCompleto = require('../index').app;
+    const r2 = await request(appCompleto).get('/health');
+    expect(r2.body.config.email).toBe(true);
+
+    delete process.env.GMAIL_USER;
+    delete process.env.GMAIL_APP_PASSWORD;
+  });
+
   test('GET /health NÃO revela o estado da chave de cifragem', async () => {
     // Ausência proposital: dizer que a ENCRYPTION_KEY falta revelaria que os
     // segredos Tuya estão em texto puro no banco — informação sobre proteção
