@@ -1,176 +1,150 @@
 # O que falta para o app funcionar
 
-Cinco passos. **A ordem importa** — o passo 4 só faz sentido depois do 2, e o 5
-só depois do 4.
+> **Reescrito em 19/10/2026.** A versão anterior descrevia a infraestrutura de
+> setembro, que não existe mais. Em 09/10 todos os recursos que geravam custo
+> foram excluídos — o App Service Premium, o PostgreSQL na camada Uso Geral, a
+> rede virtual e as zonas DNS — depois de uma cobrança de R$ 586,17 que o plano
+> estudantil não cobria. O que existe agora foi recriado **dentro das camadas
+> gratuitas**, e o desenho mudou junto.
 
-> O que já está pronto: a API está no ar com o código novo, o frontend compila
-> com a URL correta embutida, e os dois pipelines estão verdes. O que falta é
-> configuração, e boa parte só você pode fazer: são segredos.
+## Infraestrutura atual
 
-**Seus recursos no Azure** (conferidos em 14/09):
+| Recurso | Tipo | Camada | Região |
+|---|---|---|---|
+| `ihome-api-2026` | App Service — a API | **Gratuito F1** | West US 3 |
+| `ASP-Ihome-a371` | Plano do App Service | **Gratuito F1** | West US 3 |
+| `ihome-db-2026` | PostgreSQL Flexible — o banco | **Intermitente B1ms**, 32 GiB | Canada Central |
+| `ihome-front` | Static Web App — o site | Free | East US 2 |
 
-| Recurso | Tipo | Região |
-|---|---|---|
-| `ihome-app` | App Service — a API | West Central US |
-| `ihome-app-server` | PostgreSQL — o banco | West Central US |
-| `ihome-front` | Static Web App — o site | East US 2 |
-| `ASP-Ihome-9c05` | Plano que cobra pelo App Service | West Central US |
-| `vnet-lzbljxgr` + `privatelink.postgres…` | Rede privada do banco | — |
+**Endereços**
 
----
+- API — `https://ihome-api-2026-cxc9fwdzhcddb6cg.westus3-01.azurewebsites.net`
+- Site — `https://ambitious-water-08155590f.5.azurestaticapps.net`
+- Banco — `ihome-db-2026.postgres.database.azure.com`
 
-## 1️⃣ Baixar o plano — faça hoje, é dinheiro por hora
+### Duas consequências da mudança que o código precisa respeitar
 
-O plano está em **P0v4**, da linha Premium: algo entre US$ 60 e 80 por mês. O
-**B1** faz o mesmo para este projeto por ~US$ 13. Com Premium, seus créditos
-acabam antes do Demo Day.
+**1. O banco agora é de acesso público, não mais private endpoint.**
 
-1. Portal → busque **ihome-app**
-2. Menu da esquerda → **Plano do Serviço de Aplicativo**
-3. **Escalar verticalmente (Plano do Serviço de Aplicativo)**
-4. Aba **Desenvolvimento/Teste** → **B1** → **Selecionar**
+A rede virtual e o endpoint privado foram excluídos, e recriá-los não cabe no
+gratuito. O `ihome-db-2026` usa **Acesso público** com duas regras de firewall:
+"permitir serviços do Azure" (é assim que o App Service chega nele) e o IP da
+máquina de desenvolvimento. O método de conectividade é fixado na criação do
+servidor — não dá para voltar atrás sem recriar.
 
-Não derruba o site: troca o tamanho da máquina por baixo.
+Isso é menos isolado do que o desenho anterior, e vale registrar como tal: a
+porta 5432 só aceita conexões das origens listadas no firewall, mas a camada de
+rede deixou de ser uma barreira e a autenticação passou a ser a única. Para um
+projeto acadêmico de usuário único é aceitável; num sistema real a VNet volta.
 
-> Se o B1 der erro de cota, escolha **F1 (Gratuito)** por enquanto. O F1 dorme
-> depois de 20 minutos parado — não serve para a apresentação, mas segura o
-> gasto até resolvermos.
+**2. O plano F1 não tem "Always On".**
 
----
+A API hiberna depois de ~20 minutos sem requisição e leva alguns segundos para
+responder a primeira chamada depois disso. Duas implicações:
 
-## 2️⃣ Gerar os dois segredos
-
-Abra o [Cloud Shell](https://shell.azure.com) (ícone `>_` no topo do portal) e
-rode **duas vezes**:
-
-```bash
-openssl rand -hex 32
-```
-
-Cada execução devolve 64 caracteres. O primeiro será o `JWT_SECRET`, o segundo
-o `ENCRYPTION_KEY`.
-
-> ⚠️ **Guarde os dois fora do Azure** — bloco de notas, gerenciador de senhas.
-> Trocar o `JWT_SECRET` desconecta todo mundo. Perder o `ENCRYPTION_KEY` torna
-> as credenciais Tuya já cifradas **impossíveis de recuperar**.
+- Antes de qualquer apresentação, abra a URL da API uma vez para acordá-la.
+- O `scheduler.job.js` só executa enquanto o processo está vivo. Com o site
+  dormindo, rotinas agendadas podem não disparar no horário. É uma limitação
+  real da camada gratuita, não um defeito do código — e é exatamente o tipo de
+  coisa que um plano pago (B1, "Always On" ligado) resolve.
 
 ---
 
-## 3️⃣ Preencher as variáveis no App Service
+## 1️⃣ Variáveis de ambiente do App Service
 
-Portal → **ihome-app** → menu esquerdo → **Configurações** → **Variáveis de
-ambiente**. Para cada linha: **+ Adicionar**, preencha Nome e Valor. No fim,
-**Aplicar** e confirme.
+Portal → **ihome-api-2026** → **Configurações → Variáveis de ambiente** →
+**Configurações do aplicativo**.
 
 | Nome | Valor | Sem ela |
 |---|---|---|
-| `JWT_SECRET` | o primeiro código do passo 2 | nenhum login funciona |
-| `ENCRYPTION_KEY` | o segundo código do passo 2 | segredos Tuya ficam em texto puro |
+| `NODE_ENV` | `production` | o SSL do banco não é ativado |
 | `DATABASE_URL` | veja abaixo | a API não acessa o banco |
-| `FRONTEND_URL` | `https://ihomeauto.com` | o site é bloqueado pelo CORS |
-| `BACKEND_URL` | `https://ihome-app-ffa2cgh4ghbecwda.westcentralus-01.azurewebsites.net` | links do e-mail saem errados |
-| `NODE_ENV` | `production` | SSL do banco não é ativado |
-| `GEMINI_API_KEY` | sua chave do Gemini | assistente desativado |
-| `GMAIL_USER` | seu e-mail | convites não são enviados |
-| `GMAIL_APP_PASSWORD` | senha de app do Gmail | idem |
+| `JWT_SECRET` | 64 caracteres aleatórios | nenhum login funciona |
+| `ENCRYPTION_KEY` | 64 caracteres hexadecimais | segredos Tuya ficam em texto puro |
+| `FRONTEND_URL` | o endereço do Static Web App | o site é bloqueado pelo CORS |
+| `BACKEND_URL` | o endereço da API | links de e-mail saem errados |
+| `GEMINI_API_KEY` | sua chave do Google AI Studio | assistente desativado |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | par gerado pelo `web-push` | notificações push desativadas |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | opcional | convites por e-mail não são enviados |
+
+Gerar os segredos, cada comando uma vez:
+
+```bash
+npm run gen:key                               # JWT_SECRET e ENCRYPTION_KEY
+npx web-push generate-vapid-keys              # par VAPID
+```
+
+> ⚠️ **Guarde os dois primeiros fora do Azure.** Trocar o `JWT_SECRET`
+> desconecta todo mundo. Perder o `ENCRYPTION_KEY` torna as credenciais Tuya já
+> cifradas impossíveis de recuperar.
 
 ### Sobre a `DATABASE_URL`
 
-**Antes de criar, procure na lista se já existe `AZURE_POSTGRESQL_CONNECTIONSTRING`.**
-O Azure costuma criar essa variável sozinho quando o App Service é provisionado
-junto com o banco — e o código agora lê essa variável automaticamente quando a
-`DATABASE_URL` não existe. Se ela já estiver lá **e começar com `postgresql://`**,
-não precisa fazer nada neste item.
-
-Se não existir, ou se existir no formato `Server=...;Database=...`, monte a sua:
-
 ```
-postgresql://USUARIO:SENHA@ihome-app-server.postgres.database.azure.com:5432/ihome?sslmode=require
+postgresql://ihomeadmin:SENHA@ihome-db-2026.postgres.database.azure.com:5432/postgres?sslmode=require
 ```
 
-Troque `USUARIO` e `SENHA` pelos que você definiu ao criar o banco. Se não
-lembrar o nome do banco, veja em **ihome-app-server** → **Bancos de dados**.
+O `env.js` exige o formato URI. O Azure às vezes injeta a string no formato
+ADO.NET (`Server=...;Database=...`), que o driver `pg` não entende — o próprio
+boot avisa quando isso acontece.
 
-> **Atenção à rede:** o seu PostgreSQL está atrás de um *private endpoint* — ele
-> não é acessível pela internet, só de dentro da rede virtual `vnet-lzbljxgr`.
-> Isso é bom para segurança e provavelmente já está configurado, porque o Azure
-> costuma ligar os dois quando são criados juntos. Se depois de tudo o
-> `/health` continuar dizendo que o banco está desconectado, confira em
-> **ihome-app** → **Rede** → **Integração de rede virtual** se a VNet aparece
-> ligada. É o único ponto deste guia que pode exigir um passo extra.
+O banco `postgres` já vem criado no servidor e é suficiente: o `db/schema.js`
+cria todas as tabelas na primeira subida, com `IF NOT EXISTS`.
 
 ### Como saber se deu certo
 
-Abra no navegador, depois de o App Service reiniciar (leva ~1 minuto):
-
 ```
-https://ihome-app-ffa2cgh4ghbecwda.westcentralus-01.azurewebsites.net/health
+https://ihome-api-2026-cxc9fwdzhcddb6cg.westus3-01.azurewebsites.net/health
 ```
-
-A resposta agora diz o que está configurado:
 
 ```json
 {
   "ok": true,
-  "push": false,
+  "push": true,
   "config": {
     "database": true,
     "auth": true,
     "frontendUrl": true,
     "ai": true,
-    "email": true
+    "email": false
   }
 }
 ```
 
-**Todos os campos de `config` precisam estar `true`** (o `push` é opcional).
 Qualquer `false` aponta exatamente qual variável faltou.
 
 ---
 
-## 4️⃣ Publicar o site no Azure
+## 2️⃣ Secret de publicação no GitHub
 
-Hoje o `ihome-front` responde **404**: não há nada em produção, porque o único
-envio para a `main` foi justamente o build que falhava.
+O workflow `main_ihome-app.yml` publica em `ihome-api-2026` e lê o secret
+`AZUREAPPSERVICE_PUBLISHPROFILE`.
 
-O conteúdo já está pronto no branch `develop`, nos dois Pull Requests. Assim que
-o Pedro e o Luis comentarem (você precisa dos reviews para a N1 de qualquer
-forma), faça o merge:
-
-1. Abra o PR do frontend → **Merge pull request**
-2. O workflow do Azure roda sozinho e publica
-
-Para conferir, abra o endereço do Static Web App — ele aparece em **ihome-front**
-→ **Visão geral** → **URL**. Deve mostrar a tela de login, e agora o botão
-**Entrar** deve funcionar de verdade.
+1. Portal → **ihome-api-2026** → **Visão geral** → **Baixar perfil de
+   publicação**
+2. GitHub → `ihome-backend` → **Settings → Secrets and variables → Actions** →
+   **New repository secret** com esse nome e o XML inteiro como valor
+3. Apague o secret antigo `AZUREAPPSERVICE_PUBLISHPROFILE_B31046…` — aponta
+   para um recurso que não existe mais
 
 ---
 
-## 5️⃣ Tirar o domínio da Vercel
+## 3️⃣ Primeiro acesso
 
-O `ihomeauto.com` ainda aponta para a Vercel — o cabeçalho da resposta diz
-`server: Vercel`. Desinstalar o app do GitHub parou os deploys novos, mas o
-domínio continua servindo o último build que ela fez.
+O banco é novo e está **vazio**: não há contas, dispositivos nem histórico.
 
-**Só faça este passo depois que o passo 4 estiver funcionando**, senão o site
-fica fora do ar no intervalo.
-
-1. No painel da Vercel, remova o domínio `ihomeauto.com` do projeto
-2. No Azure: **ihome-front** → **Domínios personalizados** → **Adicionar**
-3. O Azure mostra um registro (CNAME ou TXT) para criar no seu registrador
-4. Crie o registro onde o domínio está registrado e aguarde a validação
-
-> Você também tem uma zona DNS no Azure chamada `intligenthomeservices.net`
-> (repare que falta o "e" de "intelligent"). Se o `ihomeauto.com` for gerenciado
-> por lá, o registro pode ser criado direto no portal. Se estiver em outro
-> registrador, é lá que você mexe.
+1. Abra o site e **crie a conta de novo**
+2. Em **Configurações**, cole as credenciais Tuya (Access ID e Access Secret)
+   para os dispositivos voltarem a aparecer
 
 ---
 
-## Depois de tudo
+## Pendências
 
-- [ ] `/health` com todos os `config` em `true`
+- [ ] `/health` com os `config` em `true`
 - [ ] Login funcionando no endereço do Static Web App
-- [ ] `ihomeauto.com` respondendo pelo Azure (confira: o cabeçalho não pode mais dizer `server: Vercel`)
+- [ ] Decidir o que fazer com o `ihomeauto.com` — a zona DNS foi excluída e o
+      domínio não resolve mais. Zona DNS no Azure **não é gratuita**; até lá, o
+      endereço oficial é o `.azurestaticapps.net`
+- [ ] PR #4 do backend, ainda aberto
 - [ ] Publicar a Wiki — instruções em [`wiki/PUBLICAR.md`](wiki/PUBLICAR.md)
-- [ ] Marcar as duas orientações — prazo 30/09
