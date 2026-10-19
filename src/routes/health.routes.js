@@ -46,7 +46,16 @@ router.get('/health', (req, res) => {
       auth: Boolean(env.jwtSecret),
       frontendUrl: Boolean(process.env.FRONTEND_URL),
       ai: Boolean(env.geminiApiKey),
-      email: Boolean(env.gmailUser),
+      // As DUAS variáveis, não só o usuário.
+      //
+      // Antes bastava GMAIL_USER para este campo virar true. Configurar só o
+      // endereço e esquecer a senha de app é o erro mais provável dos dois —
+      // o endereço a pessoa sabe de cabeça, a senha precisa ser gerada numa
+      // outra tela do Google. O resultado era o pior dos mundos: o diagnóstico
+      // dizia que o e-mail estava pronto, e o convite falhava na hora do envio.
+      //
+      // É exatamente a falha silenciosa que esta rota existe para evitar.
+      email: Boolean(env.gmailUser && env.gmailAppPassword),
     },
   });
 });

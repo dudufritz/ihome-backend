@@ -123,6 +123,10 @@ function checkEnv() {
     ['GEMINI_API_KEY', env.geminiApiKey, 'assistente de IA desativado'],
     ['VAPID_PUBLIC_KEY', env.vapidPublicKey, 'notificações push desativadas'],
     ['GMAIL_USER', env.gmailUser, 'convites por e-mail não serão enviados'],
+    // Avisada em separado porque é a metade que mais se esquece: o endereço a
+    // pessoa sabe de cabeça, a senha de app precisa ser gerada numa outra tela
+    // do Google. Com uma só das duas, o envio falha na hora do convite.
+    ['GMAIL_APP_PASSWORD', env.gmailAppPassword, 'convites por e-mail não serão enviados'],
   ];
   for (const [nome, valor, consequencia] of opcionais) {
     if (!valor) console.warn(`⚠️  ${nome} ausente — ${consequencia}.`);
