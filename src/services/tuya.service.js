@@ -78,6 +78,20 @@ function explicarErroTuya(resposta, baseUrl) {
     1100: 'Nenhum dispositivo vinculado ao projeto. '
         + 'Em platform.tuya.com → seu projeto → Devices → Link Tuya App Account, '
         + 'escaneie o QR code pelo app Smart Life.',
+    // Projeto sem assinatura ativa para esta API.
+    //
+    // É o código que a Tuya devolve quando o período de avaliação do projeto
+    // de nuvem termina. As credenciais continuam válidas e o vínculo com o
+    // Smart Life continua lá: o que caducou foi a autorização para chamar a
+    // API. Vale separar dos demais porque a ação é outra — não adianta
+    // regerar credencial nem refazer o vínculo.
+    28841002: 'O projeto na Tuya não está autorizado a chamar esta API. '
+        + 'Normalmente é o período de avaliação do projeto de nuvem que venceu. '
+        + 'Em platform.tuya.com → Cloud → Development → seu projeto → Service API, '
+        + 'confira a validade de "IoT Core" e renove a avaliação se estiver expirada.',
+    // Token inválido ou expirado do lado da Tuya.
+    1010: 'O token de acesso expirou do lado da Tuya. '
+        + 'Tente novamente; se persistir, confira o Access Secret.',
   };
 
   const explicacao = explicacoes[codigo];

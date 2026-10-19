@@ -9,7 +9,7 @@ const express = require('express');
 const { pool } = require('../config/database');
 const { authMiddleware } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/http');
-const { getUserTuya, tuyaRequest } = require('../services/tuya.service');
+const { getUserTuya, tuyaRequest, explicarErroTuya } = require('../services/tuya.service');
 
 const router = express.Router();
 
@@ -126,6 +126,18 @@ router.delete('/my-devices/:id', authMiddleware, asyncHandler(async (req, res) =
  * devolver sempre uma chave de continuação, o laço para em vez de prender a
  * requisição para sempre.
  *
+ * ERRO NÃO É LISTA VAZIA. Quando a Tuya recusa a chamada ela responde
+ * `{success:false, code:1106, msg:"permission deny"}` — com status HTTP 200 e
+ * sem o campo `result`. A leitura otimista que havia aqui transformava isso em
+ * `[]`, e a tela anunciava "nenhum dispositivo encontrado na conta Tuya":
+ * exatamente a frase que manda a pessoa conferir o vínculo do Smart Life,
+ * quando o problema é permissão da API ou período de avaliação do projeto
+ * vencido. O usuário revalida um vínculo que está correto e não sai do lugar.
+ *
+ * Checar `success` antes de ler `result` é o que separa "a conta não tem
+ * dispositivos" de "a Tuya não deixou perguntar" — duas situações com ações
+ * opostas.
+ *
  * @param {(chave: string) => string} montarUrl monta a URL com a chave de página
  */
 async function listarPaginado(montarUrl, ID, SECRET, BASE) {
@@ -133,6 +145,11 @@ async function listarPaginado(montarUrl, ID, SECRET, BASE) {
   let chave = '';
   for (let pagina = 0; pagina < 10; pagina++) {
     const resposta = await tuyaRequest('GET', montarUrl(chave), ID, SECRET, BASE);
+
+    if (resposta?.success === false) {
+      throw new Error(explicarErroTuya(resposta, BASE));
+    }
+
     const lista = resposta?.result?.devices || resposta?.result || [];
     if (!Array.isArray(lista) || lista.length === 0) break;
     todos = todos.concat(lista);
