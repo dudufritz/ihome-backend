@@ -89,6 +89,32 @@ function explicarErroTuya(resposta, baseUrl) {
         + 'Normalmente é o período de avaliação do projeto de nuvem que venceu. '
         + 'Em platform.tuya.com → Cloud → Development → seu projeto → Service API, '
         + 'confira a validade de "IoT Core" e renove a avaliação se estiver expirada.',
+    // Avaliação válida, mas a cota do pacote de recursos acabou.
+    //
+    // Distinto do 28841002, e a confusão entre os dois custa tempo: ali o
+    // projeto perdeu a autorização; aqui ele a tem, e o que acabou foi o
+    // saldo do "Cloud Develop Base Resource Trial" — uma cota em dólares que
+    // toda chamada consome e que se renova mensalmente. Estender a avaliação
+    // não recarrega essa cota.
+    28841004: 'A cota do pacote de recursos do IoT Core se esgotou. '
+        + 'A avaliação do projeto pode estar válida e ainda assim as chamadas '
+        + 'serem recusadas: são coisas separadas. '
+        + 'Em platform.tuya.com → Cloud → Development → seu projeto → Service API → '
+        + 'IoT Core, veja "Cloud Develop Base Resource Trial" — se estiver '
+        + 'Suspended, é preciso aguardar a renovação mensal da cota ou assinar '
+        + 'um novo pacote de recursos.',
+    // A allowlist de IP do projeto recusou a origem da chamada.
+    //
+    // Vale a mensagem explícita porque o sintoma engana: a falha aparece na
+    // autenticação e parece credencial errada. O endereço que a Tuya recusou
+    // vem na própria resposta, e num App Service ele muda sozinho — o plano
+    // tem dezenas de IPs de saída possíveis, acima do limite de 20 entradas
+    // que a allowlist aceita por data center.
+    1114: 'A lista de IPs autorizados do projeto Tuya recusou este endereço. '
+        + 'Em platform.tuya.com → Cloud → Development → seu projeto → Overview, '
+        + 'veja "Cloud Authorization IP Allowlist": ou cadastre o IP recusado, '
+        + 'ou desligue a lista. Hospedagens em nuvem costumam sair por vários '
+        + 'endereços diferentes, o que torna a lista pouco prática.',
     // Token inválido ou expirado do lado da Tuya.
     1010: 'O token de acesso expirou do lado da Tuya. '
         + 'Tente novamente; se persistir, confira o Access Secret.',
@@ -199,7 +225,62 @@ async function getUserTuya(email) {
   return { ...config, tuya_secret: decrypt(config.tuya_secret) };
 }
 
+/**
+ * Quantos dispositivos cabem numa consulta de estado em lote.
+ * É o teto da própria API da Tuya; acima disso a chamada é recusada.
+ */
+const LOTE_MAXIMO = 20;
+
+/**
+ * Consulta o estado de VÁRIOS dispositivos de uma vez.
+ *
+ * POR QUE ISTO EXISTE: a leitura era uma chamada por dispositivo. Numa casa
+ * com 20 aparelhos, cada atualização da tela custava 20 chamadas, e a tela se
+ * atualiza sozinha a cada 30 segundos — mais o monitor de conectividade, que
+ * varre tudo de novo em segundo plano. São dezenas de milhares de chamadas por
+ * dia para mostrar a mesma casa.
+ *
+ * Isso não é só desperdício: a avaliação gratuita da Tuya trabalha com uma
+ * COTA MENSAL de chamadas, e esse volume a consome em poucos dias. Quando ela
+ * acaba, a API para de responder e o app inteiro parece quebrado — foi
+ * exatamente o que aconteceu em outubro de 2026.
+ *
+ * Uma chamada em lote traz até 20 aparelhos, o que reduz o consumo na mesma
+ * proporção.
+ *
+ * O que devolve: um Map de `tuya_id` → objeto `{ código: valor }`. Quem não
+ * aparecer no Map é dispositivo que a Tuya não soube responder — a leitura
+ * de "online" continua sendo a ausência ou presença da resposta, igual a
+ * antes, para não mudar o comportamento dos alertas de queda.
+ */
+async function buscarStatusEmLote(ids, accessId, accessSecret, baseUrl) {
+  const porDispositivo = new Map();
+
+  for (let i = 0; i < ids.length; i += LOTE_MAXIMO) {
+    const fatia = ids.slice(i, i + LOTE_MAXIMO);
+    const resposta = await tuyaRequest(
+      'GET',
+      `/v1.0/iot-03/devices/status?device_ids=${fatia.join(',')}`,
+      accessId, accessSecret, baseUrl
+    );
+
+    // Recusa da Tuya (cota, permissão, allowlist) não é "nenhum dispositivo":
+    // precisa subir como erro para quem chamou decidir o que fazer.
+    if (resposta?.success === false) {
+      throw new Error(explicarErroTuya(resposta, baseUrl));
+    }
+
+    for (const item of resposta?.result || []) {
+      const mapa = {};
+      (item?.status || []).forEach(({ code, value }) => { mapa[code] = value; });
+      porDispositivo.set(item.id, mapa);
+    }
+  }
+
+  return porDispositivo;
+}
+
 module.exports = {
   makeSign, sha256, getToken, tuyaRequest, getUserTuya, tokenCache,
-  explicarErroTuya, REGIOES,
+  explicarErroTuya, REGIOES, buscarStatusEmLote, LOTE_MAXIMO,
 };
