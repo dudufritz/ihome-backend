@@ -89,6 +89,32 @@ function explicarErroTuya(resposta, baseUrl) {
         + 'Normalmente é o período de avaliação do projeto de nuvem que venceu. '
         + 'Em platform.tuya.com → Cloud → Development → seu projeto → Service API, '
         + 'confira a validade de "IoT Core" e renove a avaliação se estiver expirada.',
+    // Avaliação válida, mas a cota do pacote de recursos acabou.
+    //
+    // Distinto do 28841002, e a confusão entre os dois custa tempo: ali o
+    // projeto perdeu a autorização; aqui ele a tem, e o que acabou foi o
+    // saldo do "Cloud Develop Base Resource Trial" — uma cota em dólares que
+    // toda chamada consome e que se renova mensalmente. Estender a avaliação
+    // não recarrega essa cota.
+    28841004: 'A cota do pacote de recursos do IoT Core se esgotou. '
+        + 'A avaliação do projeto pode estar válida e ainda assim as chamadas '
+        + 'serem recusadas: são coisas separadas. '
+        + 'Em platform.tuya.com → Cloud → Development → seu projeto → Service API → '
+        + 'IoT Core, veja "Cloud Develop Base Resource Trial" — se estiver '
+        + 'Suspended, é preciso aguardar a renovação mensal da cota ou assinar '
+        + 'um novo pacote de recursos.',
+    // A allowlist de IP do projeto recusou a origem da chamada.
+    //
+    // Vale a mensagem explícita porque o sintoma engana: a falha aparece na
+    // autenticação e parece credencial errada. O endereço que a Tuya recusou
+    // vem na própria resposta, e num App Service ele muda sozinho — o plano
+    // tem dezenas de IPs de saída possíveis, acima do limite de 20 entradas
+    // que a allowlist aceita por data center.
+    1114: 'A lista de IPs autorizados do projeto Tuya recusou este endereço. '
+        + 'Em platform.tuya.com → Cloud → Development → seu projeto → Overview, '
+        + 'veja "Cloud Authorization IP Allowlist": ou cadastre o IP recusado, '
+        + 'ou desligue a lista. Hospedagens em nuvem costumam sair por vários '
+        + 'endereços diferentes, o que torna a lista pouco prática.',
     // Token inválido ou expirado do lado da Tuya.
     1010: 'O token de acesso expirou do lado da Tuya. '
         + 'Tente novamente; se persistir, confira o Access Secret.',
