@@ -132,4 +132,43 @@ describe('GET /discover-devices', () => {
     expect(r.status).toBe(200);
     expect(r.body.devices).toEqual([]);
   });
+
+  // A distincao que estes dois testes guardam: a Tuya responde HTTP 200 tanto
+  // para "nao ha dispositivos" quanto para "voce nao pode perguntar". O teste
+  // acima cobre o primeiro caso; os de baixo garantem que o segundo nao seja
+  // confundido com ele, porque a acao do usuario e oposta.
+  test('recusa da Tuya vira erro, nao lista vazia', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tuya_access_id: 'acc4', tuya_secret: 'sec4', tuya_base_url: 'https://openapi.tuyaus.com' }], rowCount: 1,
+    });
+    axios.get.mockResolvedValueOnce({
+      data: { success: true, result: { access_token: 'tok4', expire_time: 7200 } },
+    });
+    // Permissao negada: HTTP 200, success false, sem `result`.
+    axios.mockResolvedValueOnce({
+      data: { success: false, code: 1106, msg: 'permission deny' },
+    });
+    const r = await request(ctx.app).get('/discover-devices').set('Authorization', `Bearer ${tok()}`);
+    expect(r.status).toBe(500);
+    expect(r.body.error).toMatch(/Service API/);
+    // Nao pode ter caido para o segundo caminho: a conta nao foi consultada
+    // com sucesso, entao "o primeiro nao trouxe nada" nem se aplica.
+    const urls = axios.mock.calls.map((c) => c[0]?.url || '');
+    expect(urls.some((u) => /iot-03\/devices/.test(u))).toBe(false);
+  });
+
+  test('avaliacao do projeto vencida explica o que renovar', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tuya_access_id: 'acc5', tuya_secret: 'sec5', tuya_base_url: 'https://openapi.tuyaus.com' }], rowCount: 1,
+    });
+    axios.get.mockResolvedValueOnce({
+      data: { success: true, result: { access_token: 'tok5', expire_time: 7200 } },
+    });
+    axios.mockResolvedValueOnce({
+      data: { success: false, code: 28841002, msg: 'No permissions. This project is not authorized to call this API' },
+    });
+    const r = await request(ctx.app).get('/discover-devices').set('Authorization', `Bearer ${tok()}`);
+    expect(r.status).toBe(500);
+    expect(r.body.error).toMatch(/avalia/i);
+  });
 });

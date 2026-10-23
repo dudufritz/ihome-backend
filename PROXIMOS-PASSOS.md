@@ -18,9 +18,21 @@
 
 **Endereços**
 
+- Site — **`https://ihomeauto.com`** (também responde em
+  `https://ambitious-water-08155590f.5.azurestaticapps.net`)
 - API — `https://ihome-api-2026-cxc9fwdzhcddb6cg.westus3-01.azurewebsites.net`
-- Site — `https://ambitious-water-08155590f.5.azurestaticapps.net`
 - Banco — `ihome-db-2026.postgres.database.azure.com`
+
+O domínio é servido pelo DNS da Vercel (gratuito), com `ALIAS` na raiz e
+`CNAME` no `www` apontando para o Static Web App. A delegação ficou quebrada
+entre 09/10 e 19/10 porque os nameservers apontavam para a zona DNS do Azure
+que havia sido excluída na contenção de custo.
+
+Como a API valida a origem das requisições pelo `FRONTEND_URL`, os dois
+endereços precisam estar liberados: o domínio em `FRONTEND_URL` e o
+`.azurestaticapps.net` em `CORS_EXTRA_ORIGINS`. Trocar um sem o outro derruba
+o login com um erro de CORS que não aparece no log do servidor, só no console
+do navegador.
 
 ### Duas consequências da mudança que o código precisa respeitar
 
@@ -61,7 +73,8 @@ Portal → **ihome-api-2026** → **Configurações → Variáveis de ambiente**
 | `DATABASE_URL` | veja abaixo | a API não acessa o banco |
 | `JWT_SECRET` | 64 caracteres aleatórios | nenhum login funciona |
 | `ENCRYPTION_KEY` | 64 caracteres hexadecimais | segredos Tuya ficam em texto puro |
-| `FRONTEND_URL` | o endereço do Static Web App | o site é bloqueado pelo CORS |
+| `FRONTEND_URL` | `https://ihomeauto.com` | o site é bloqueado pelo CORS |
+| `CORS_EXTRA_ORIGINS` | o `.azurestaticapps.net` e o `www`, separados por vírgula | esses endereços são bloqueados |
 | `BACKEND_URL` | o endereço da API | links de e-mail saem errados |
 | `GEMINI_API_KEY` | sua chave do Google AI Studio | assistente desativado |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | par gerado pelo `web-push` | notificações push desativadas |
@@ -143,8 +156,9 @@ O banco é novo e está **vazio**: não há contas, dispositivos nem histórico.
 
 - [ ] `/health` com os `config` em `true`
 - [ ] Login funcionando no endereço do Static Web App
-- [ ] Decidir o que fazer com o `ihomeauto.com` — a zona DNS foi excluída e o
-      domínio não resolve mais. Zona DNS no Azure **não é gratuita**; até lá, o
-      endereço oficial é o `.azurestaticapps.net`
+- [x] `ihomeauto.com` de volta no ar, pelo DNS da Vercel, sem custo
+- [ ] Renovação do domínio em 08/06/2027 (US$ 11,25): o método de pagamento na
+      Vercel está incompleto desde o cancelamento do cartão. Sem corrigir, o
+      domínio expira
 - [ ] PR #4 do backend, ainda aberto
 - [ ] Publicar a Wiki — instruções em [`wiki/PUBLICAR.md`](wiki/PUBLICAR.md)
