@@ -129,7 +129,7 @@ describe('GET /devices — quem tem botão de ligar', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 1, tuya_id: 'd1', name: 'Lâmpada', room: 'Sala', category: 'dj' }], rowCount: 1,
     });
-    axios.mockResolvedValueOnce({ data: { result: [{ code: 'switch_1', value: true }] } });
+    axios.mockResolvedValueOnce({ data: { result: [{ id: 'd1', status: [{ code: 'switch_1', value: true }] }] } });
 
     const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
     const d = r.body.result.list[0];
@@ -146,7 +146,7 @@ describe('GET /devices — quem tem botão de ligar', () => {
       rows: [{ id: 2, tuya_id: 'd2', name: 'Sensor', room: 'Corredor', category: 'pir' }], rowCount: 1,
     });
     axios.mockResolvedValueOnce({
-      data: { result: [{ code: 'pir', value: 'pir' }, { code: 'battery_percentage', value: 90 }] },
+      data: { result: [{ id: 'd2', status: [{ code: 'pir', value: 'pir' }, { code: 'battery_percentage', value: 90 }] }] },
     });
 
     const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
@@ -161,7 +161,7 @@ describe('GET /devices — quem tem botão de ligar', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 3, tuya_id: 'd3', name: 'Fita LED', room: '', category: 'dd' }], rowCount: 1,
     });
-    axios.mockResolvedValueOnce({ data: { result: [{ code: 'switch_led', value: false }] } });
+    axios.mockResolvedValueOnce({ data: { result: [{ id: 'd3', status: [{ code: 'switch_led', value: false }] }] } });
 
     const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
     const d = r.body.result.list[0];
@@ -177,12 +177,34 @@ describe('GET /devices — quem tem botão de ligar', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 4, tuya_id: 'd4', name: 'Tomada', room: 'Quarto', category: 'cz' }], rowCount: 1,
     });
+    // Duas recusas: a primeira derruba a consulta em lote, a segunda o
+    // caminho de reserva, que pergunta aparelho por aparelho. So entao o
+    // dispositivo e dado como offline.
+    axios.mockRejectedValueOnce(new Error('sem resposta'));
     axios.mockRejectedValueOnce(new Error('sem resposta'));
 
     const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
     const d = r.body.result.list[0];
     expect(d.online).toBe(false);
     expect(d.isControllable).toBe(false);
+  });
+
+  test('lote falho cai no caminho individual sem perder o estado', async () => {
+    // O lote e uma economia de cota, nao uma dependencia: se ele falhar, a
+    // rota ainda precisa devolver a casa certa. Este teste existe para que
+    // uma mudanca futura no lote nao derrube a tela junto.
+    mockCredenciais();
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 6, tuya_id: 'd6', name: 'Abajur', room: 'Sala', category: 'dj' }], rowCount: 1,
+    });
+    axios.mockRejectedValueOnce(new Error('lote indisponivel'));
+    axios.mockResolvedValueOnce({ data: { result: [{ code: 'switch_1', value: true }] } });
+
+    const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
+    const d = r.body.result.list[0];
+    expect(d.online).toBe(true);
+    expect(d.isControllable).toBe(true);
+    expect(d.switch_1).toBe(true);
   });
 
   test('a categoria guardada chega na tela', async () => {
@@ -192,7 +214,7 @@ describe('GET /devices — quem tem botão de ligar', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 5, tuya_id: 'd5', name: 'Câmera', room: 'Entrada', category: 'sp' }], rowCount: 1,
     });
-    axios.mockResolvedValueOnce({ data: { result: [] } });
+    axios.mockResolvedValueOnce({ data: { result: [{ id: 'd5', status: [] }] } });
 
     const r = await request(app).get('/devices').set('Authorization', `Bearer ${tok()}`);
     expect(r.body.result.list[0].category_name).toBe('sp');

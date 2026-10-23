@@ -225,7 +225,62 @@ async function getUserTuya(email) {
   return { ...config, tuya_secret: decrypt(config.tuya_secret) };
 }
 
+/**
+ * Quantos dispositivos cabem numa consulta de estado em lote.
+ * É o teto da própria API da Tuya; acima disso a chamada é recusada.
+ */
+const LOTE_MAXIMO = 20;
+
+/**
+ * Consulta o estado de VÁRIOS dispositivos de uma vez.
+ *
+ * POR QUE ISTO EXISTE: a leitura era uma chamada por dispositivo. Numa casa
+ * com 20 aparelhos, cada atualização da tela custava 20 chamadas, e a tela se
+ * atualiza sozinha a cada 30 segundos — mais o monitor de conectividade, que
+ * varre tudo de novo em segundo plano. São dezenas de milhares de chamadas por
+ * dia para mostrar a mesma casa.
+ *
+ * Isso não é só desperdício: a avaliação gratuita da Tuya trabalha com uma
+ * COTA MENSAL de chamadas, e esse volume a consome em poucos dias. Quando ela
+ * acaba, a API para de responder e o app inteiro parece quebrado — foi
+ * exatamente o que aconteceu em outubro de 2026.
+ *
+ * Uma chamada em lote traz até 20 aparelhos, o que reduz o consumo na mesma
+ * proporção.
+ *
+ * O que devolve: um Map de `tuya_id` → objeto `{ código: valor }`. Quem não
+ * aparecer no Map é dispositivo que a Tuya não soube responder — a leitura
+ * de "online" continua sendo a ausência ou presença da resposta, igual a
+ * antes, para não mudar o comportamento dos alertas de queda.
+ */
+async function buscarStatusEmLote(ids, accessId, accessSecret, baseUrl) {
+  const porDispositivo = new Map();
+
+  for (let i = 0; i < ids.length; i += LOTE_MAXIMO) {
+    const fatia = ids.slice(i, i + LOTE_MAXIMO);
+    const resposta = await tuyaRequest(
+      'GET',
+      `/v1.0/iot-03/devices/status?device_ids=${fatia.join(',')}`,
+      accessId, accessSecret, baseUrl
+    );
+
+    // Recusa da Tuya (cota, permissão, allowlist) não é "nenhum dispositivo":
+    // precisa subir como erro para quem chamou decidir o que fazer.
+    if (resposta?.success === false) {
+      throw new Error(explicarErroTuya(resposta, baseUrl));
+    }
+
+    for (const item of resposta?.result || []) {
+      const mapa = {};
+      (item?.status || []).forEach(({ code, value }) => { mapa[code] = value; });
+      porDispositivo.set(item.id, mapa);
+    }
+  }
+
+  return porDispositivo;
+}
+
 module.exports = {
   makeSign, sha256, getToken, tuyaRequest, getUserTuya, tokenCache,
-  explicarErroTuya, REGIOES,
+  explicarErroTuya, REGIOES, buscarStatusEmLote, LOTE_MAXIMO,
 };

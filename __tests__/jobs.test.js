@@ -76,7 +76,7 @@ describe('monitor.job — deteccao de transicao', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    axios.mockResolvedValueOnce({ data: { result: [{ code: 'switch_1', value: true }] } });
+    axios.mockResolvedValueOnce({ data: { result: [{ id: 'd1', status: [{ code: 'switch_1', value: true }] }] } });
     mockQuery.mockResolvedValueOnce({ rows: [{ online: true }], rowCount: 1 }); // cache: ja online
 
     await monitorDevices();
@@ -92,7 +92,7 @@ describe('monitor.job — deteccao de transicao', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    axios.mockResolvedValueOnce({ data: { result: [] } });
+    axios.mockResolvedValueOnce({ data: { result: [{ id: 'd1', status: [] }] } });
     mockQuery.mockResolvedValueOnce({ rows: [{ online: false }], rowCount: 1 }); // estava offline
 
     await monitorDevices();
@@ -108,7 +108,9 @@ describe('monitor.job — deteccao de transicao', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    axios.mockRejectedValueOnce(new Error('device unreachable')); // consulta falha
+    // Offline agora e o lote responder SEM este aparelho. A Tuya conversou;
+    // ela so nao soube responder por ele.
+    axios.mockResolvedValueOnce({ data: { result: [] } });
     mockQuery.mockResolvedValueOnce({ rows: [{ online: true }], rowCount: 1 }); // estava online
 
     await monitorDevices();
@@ -123,11 +125,31 @@ describe('monitor.job — deteccao de transicao', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    axios.mockRejectedValueOnce(new Error('unreachable'));
+    axios.mockResolvedValueOnce({ data: { result: [] } });
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // cache vazio
 
     await monitorDevices();
     expect(queryComendo(/INSERT INTO user_alerts/i)).toBeDefined();
+  });
+
+  test('Tuya fora do ar NAO vira enxurrada de alertas falsos', async () => {
+    // O caso que motivou a mudanca: quando a cota da Tuya se esgotou, TODAS
+    // as consultas passaram a falhar. No desenho antigo cada aparelho caia
+    // no catch e virava um alerta de "ficou offline" — vinte notificacoes
+    // sobre aparelhos que estavam ligados o tempo todo.
+    //
+    // Sem resposta da Tuya nao da para afirmar nada sobre a casa. O ciclo e
+    // pulado, e o cache fica como estava.
+    mockUsuarioComDispositivo();
+    axios.get.mockResolvedValueOnce({
+      data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
+    });
+    axios.mockRejectedValueOnce(new Error('quota exhausted'));
+
+    await monitorDevices();
+
+    expect(queryComendo(/INSERT INTO user_alerts/i)).toBeUndefined();
+    expect(queryComendo(/INSERT INTO device_status_cache/i)).toBeUndefined();
   });
 
   test('dispositivo que continua offline NAO alerta de novo', async () => {
@@ -135,7 +157,7 @@ describe('monitor.job — deteccao de transicao', () => {
     axios.get.mockResolvedValueOnce({
       data: { success: true, result: { access_token: 'tok', expire_time: 7200 } },
     });
-    axios.mockRejectedValueOnce(new Error('unreachable'));
+    axios.mockResolvedValueOnce({ data: { result: [] } });
     mockQuery.mockResolvedValueOnce({ rows: [{ online: false }], rowCount: 1 }); // ja estava offline
 
     await monitorDevices();

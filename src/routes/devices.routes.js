@@ -9,19 +9,68 @@ const express = require('express');
 const { pool } = require('../config/database');
 const { authMiddleware } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/http');
-const { getUserTuya, tuyaRequest } = require('../services/tuya.service');
+const { getUserTuya, tuyaRequest, buscarStatusEmLote } = require('../services/tuya.service');
 const { resolveHomeAccess } = require('../services/sharing.service');
 const { recordAudit, describeCommands } = require('../services/audit.service');
 
 const router = express.Router();
 
 /**
+ * Monta o objeto que a tela consome, a partir do estado bruto da Tuya.
+ *
+ * Fica numa função só porque os dois caminhos de leitura — o lote e o
+ * individual — precisam montar exatamente o mesmo formato. Duplicar isso era
+ * convite para os dois divergirem com o tempo, e a divergência apareceria
+ * como "o app mostra coisa diferente dependendo do dia".
+ *
+ * `statusMap` nulo significa que a Tuya não respondeu por este aparelho.
+ */
+function montarDispositivo(d, statusMap) {
+  // Campos comuns aos dois desfechos (online e offline).
+  //
+  // `isControllable` começa falso de propósito. Antes era fixo em `true`,
+  // e a tela exibia botão de ligar até em sensor de presença — que só
+  // informa estado e não aceita comando. Clicar não fazia nada, e o usuário
+  // não tinha como saber se o aparelho estava quebrado ou se o app é que era.
+  const base = {
+    id: d.tuya_id, dbId: d.id, name: d.name,
+    category_name: d.category || '', room: d.room, isControllable: false,
+  };
+
+  if (!statusMap) {
+    // Offline: não dá para saber o que ele aceita, então não oferecemos
+    // botão. Prometer um controle que pode não existir é pior que omitir.
+    return { ...base, online: false, switchCode: null, switch_1: false };
+  }
+
+  // Quem decide se o aparelho é controlável é o próprio aparelho: se ele
+  // reporta um código de interruptor, aceita comando. Perguntar ao
+  // dispositivo funciona para modelos que ainda nem existem — uma lista
+  // de categorias nossa começaria desatualizada.
+  const codigoDeLiga = ['switch_1', 'switch', 'switch_led'].find((c) => c in statusMap);
+
+  return {
+    ...base,
+    online: true,
+    isControllable: Boolean(codigoDeLiga),
+    // Guardamos QUAL código liga este aparelho: nem todos usam switch_1,
+    // e mandar o código errado faz a Tuya aceitar a chamada sem efeito.
+    switchCode: codigoDeLiga || null,
+    switch_1: codigoDeLiga ? statusMap[codigoDeLiga] === true : false,
+  };
+}
+
+/**
  * GET /devices — dispositivos do usuário com o estado atual de cada um.
  *
- * As consultas de estado vão para a Tuya em PARALELO (Promise.all): com 10
- * dispositivos e 300ms por chamada, em série seriam 3 segundos; em paralelo,
- * ~300ms. Cada chamada tem o próprio try/catch, então um dispositivo fora do
- * ar aparece como offline em vez de derrubar a lista inteira.
+ * UMA chamada à Tuya para todos os aparelhos, em vez de uma por aparelho.
+ * O motivo está em `buscarStatusEmLote`: a cota mensal da avaliação gratuita
+ * é contada em chamadas, e esta rota é chamada sozinha a cada 30 segundos
+ * enquanto a tela estiver aberta.
+ *
+ * Se o lote falhar, caímos no caminho antigo — uma chamada por dispositivo,
+ * em paralelo. É mais caro, mas é o comportamento que já rodava em produção,
+ * e preferimos degradar para algo conhecido a devolver tela vazia.
  */
 router.get('/devices', authMiddleware, asyncHandler(async (req, res) => {
   let config;
@@ -40,44 +89,33 @@ router.get('/devices', authMiddleware, asyncHandler(async (req, res) => {
     [req.user.email]
   );
 
-  const list = await Promise.all(devResult.rows.map(async (d) => {
-    // Campos comuns aos dois desfechos (online e offline).
-    //
-    // `isControllable` começa falso de propósito. Antes era fixo em `true`,
-    // e a tela exibia botão de ligar até em sensor de presença — que só
-    // informa estado e não aceita comando. Clicar não fazia nada, e o usuário
-    // não tinha como saber se o aparelho estava quebrado ou se o app é que era.
-    const base = {
-      id: d.tuya_id, dbId: d.id, name: d.name,
-      category_name: d.category || '', room: d.room, isControllable: false,
-    };
-    try {
-      const s = await tuyaRequest('GET', `/v1.0/iot-03/devices/${d.tuya_id}/status`, ID, SECRET, BASE);
-      // A Tuya devolve [{code,value},...]; viramos num objeto para consulta direta.
-      const statusMap = {};
-      (s?.result || []).forEach((item) => { statusMap[item.code] = item.value; });
+  let porId = null;
+  try {
+    porId = await buscarStatusEmLote(devResult.rows.map((d) => d.tuya_id), ID, SECRET, BASE);
+  } catch {
+    porId = null; // o lote não veio; o bloco abaixo usa o caminho individual
+  }
 
-      // Quem decide se o aparelho é controlável é o próprio aparelho: se ele
-      // reporta um código de interruptor, aceita comando. Perguntar ao
-      // dispositivo funciona para modelos que ainda nem existem — uma lista
-      // de categorias nossa começaria desatualizada.
-      const codigoDeLiga = ['switch_1', 'switch', 'switch_led'].find((c) => c in statusMap);
-
-      return {
-        ...base,
-        online: true,
-        isControllable: Boolean(codigoDeLiga),
-        // Guardamos QUAL código liga este aparelho: nem todos usam switch_1,
-        // e mandar o código errado faz a Tuya aceitar a chamada sem efeito.
-        switchCode: codigoDeLiga || null,
-        switch_1: codigoDeLiga ? statusMap[codigoDeLiga] === true : false,
-      };
-    } catch {
-      // Offline: não dá para saber o que ele aceita, então não oferecemos
-      // botão. Prometer um controle que pode não existir é pior que omitir.
-      return { ...base, online: false, switchCode: null, switch_1: false };
-    }
-  }));
+  let list;
+  if (porId) {
+    list = devResult.rows.map((d) => montarDispositivo(d, porId.get(d.tuya_id) || null));
+  } else {
+    // Caminho de reserva, uma chamada por dispositivo, em paralelo: com 10
+    // aparelhos e 300ms por chamada, em série seriam 3 segundos. Cada uma tem
+    // o próprio try/catch, então um aparelho fora do ar aparece como offline
+    // em vez de derrubar a lista inteira.
+    list = await Promise.all(devResult.rows.map(async (d) => {
+      try {
+        const s = await tuyaRequest('GET', `/v1.0/iot-03/devices/${d.tuya_id}/status`, ID, SECRET, BASE);
+        // A Tuya devolve [{code,value},...]; viramos num objeto para consulta direta.
+        const statusMap = {};
+        (s?.result || []).forEach((item) => { statusMap[item.code] = item.value; });
+        return montarDispositivo(d, statusMap);
+      } catch {
+        return montarDispositivo(d, null);
+      }
+    }));
+  }
 
   res.json({ result: { list }, success: true });
 }));
