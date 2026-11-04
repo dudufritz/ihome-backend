@@ -16,7 +16,7 @@ const { authMiddleware } = require('../middleware/auth');
 const { limitadorAuth } = require('../middleware/security');
 const { sendPasswordResetEmail, sendVerificationEmail } = require('../services/mail.service');
 const auth = require('../services/auth.service');
-const { excluirConta } = require('../services/account.service');
+const { excluirConta, exportarDados } = require('../services/account.service');
 
 const router = express.Router();
 
@@ -49,11 +49,12 @@ function respostaDeSessao(user, accessToken, refreshToken) {
  */
 router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
-  // Sem CPF, de propósito. O iHome pedia e gravava o CPF e não o usava em
-  // lugar nenhum — dado pessoal sem finalidade, o que a LGPD proíbe (art.
-  // 6º, III, princípio da necessidade). Se alguém ainda mandar o campo, ele
-  // é simplesmente ignorado. Apontado pelo @pdrollucas na issue #8.
-  const { password, full_name: fullName, phone } = req.body;
+  // Sem CPF e sem telefone, de propósito. Os dois eram pedidos, gravados e
+  // nunca usados — dado pessoal sem finalidade, o que a LGPD proíbe (art. 6º,
+  // III, princípio da necessidade). Se alguém ainda mandar os campos, eles
+  // são simplesmente ignorados. O CPF foi apontado pelo @pdrollucas na issue
+  // #8; o telefone apareceu na revisão de LGPD feita em seguida.
+  const { password, full_name: fullName } = req.body;
 
   if (!email || !isValidEmail(email)) {
     return res.status(400).json({ error: 'E-mail inválido.' });
@@ -68,15 +69,9 @@ router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) =
 
   const passwordHash = await auth.hashPassword(password);
   const criado = await pool.query(
-    `INSERT INTO users (email, password_hash, full_name, phone)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [
-      email,
-      passwordHash,
-      fullName || null,
-      // Guardamos só os dígitos: a máscara é responsabilidade da interface.
-      phone ? String(phone).replace(/\D/g, '') : null,
-    ]
+    `INSERT INTO users (email, password_hash, full_name)
+     VALUES ($1, $2, $3) RETURNING *`,
+    [email, passwordHash, fullName || null]
   );
   const user = criado.rows[0];
 
@@ -211,6 +206,28 @@ router.get('/auth/me', authMiddleware, asyncHandler(async (req, res) => {
   const user = await auth.buscarPorEmail(req.user.email);
   if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
   res.json({ user: auth.usuarioPublico(user) });
+}));
+
+/**
+ * GET /auth/me/dados — baixa tudo o que o iHome guarda sobre a pessoa.
+ *
+ * LGPD art. 18, II (acesso) e V (portabilidade). O conteúdo e o que fica de
+ * fora estão explicados em account.service.js → exportarDados.
+ *
+ * Content-Disposition: attachment faz o navegador tratar a resposta como
+ * download, com nome de arquivo, em vez de mostrar o JSON na tela.
+ *
+ * Não pede senha, ao contrário da exclusão: só lê, não apaga nada, e o
+ * arquivo não contém nenhum segredo. O token já basta.
+ */
+router.get('/auth/me/dados', authMiddleware, asyncHandler(async (req, res) => {
+  const user = await auth.buscarPorEmail(req.user.email);
+  if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+  const dados = await exportarDados(user);
+  const dia = new Date().toISOString().slice(0, 10);
+  res.set('Content-Disposition', `attachment; filename="ihome-meus-dados-${dia}.json"`);
+  res.json(dados);
 }));
 
 /**

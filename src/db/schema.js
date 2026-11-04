@@ -6,9 +6,10 @@
  * operação idempotente. Isso dispensa uma ferramenta de migração externa num
  * projeto deste porte, ao custo de não haver rollback.
  *
- * A regra era "só adicionamos estruturas". Há UMA exceção, e ela é
- * deliberada: a coluna `cpf`, removida no fim deste arquivo. Remover dado é
- * irreversível — e aqui o irreversível é justamente o objetivo.
+ * A regra era "só adicionamos estruturas". Há uma exceção, e ela é
+ * deliberada: as colunas `cpf` e `phone`, removidas no fim deste arquivo, por
+ * serem dados pessoais coletados sem finalidade (LGPD art. 6º, III). Remover
+ * dado é irreversível — e aqui o irreversível é justamente o objetivo.
  */
 const { pool } = require('../config/database');
 
@@ -29,7 +30,6 @@ async function initDB() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       full_name TEXT,
-      phone TEXT,
       email_verified BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -229,6 +229,13 @@ async function initDB() {
   // IF EXISTS mantém a idempotência: na primeira subida a coluna sai; nas
   // seguintes, a instrução não faz nada.
   await pool.query('ALTER TABLE users DROP COLUMN IF EXISTS cpf');
+
+  // ── Remoção do telefone ──
+  //
+  // Mesmo caso do CPF, encontrado na revisão de LGPD que veio logo depois: o
+  // cadastro exigia telefone, o banco gravava, e nenhuma tela, rota ou e-mail
+  // o usava. Sem finalidade, sai pelo mesmo motivo e do mesmo jeito.
+  await pool.query('ALTER TABLE users DROP COLUMN IF EXISTS phone');
 
   console.log('✅ Banco de dados iniciado!');
 }
