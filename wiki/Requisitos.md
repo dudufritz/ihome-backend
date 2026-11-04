@@ -6,7 +6,7 @@
 
 | ID | Requisito | Prioridade |
 |---|---|---|
-| RF01 | O sistema deve permitir criar conta com e-mail, senha, nome, CPF e telefone | Alta |
+| RF01 | O sistema deve permitir criar conta com e-mail, senha, nome e telefone (o CPF foi removido: era coletado sem finalidade — LGPD art. 6º, III) | Alta |
 | RF02 | O sistema deve autenticar por e-mail e senha, devolvendo um token de acesso | Alta |
 | RF03 | O sistema deve renovar a sessão automaticamente, sem pedir a senha de novo | Alta |
 | RF04 | O sistema deve permitir redefinir a senha por link enviado ao e-mail | Alta |

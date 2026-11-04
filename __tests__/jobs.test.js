@@ -296,4 +296,17 @@ describe('db/schema — initDB', () => {
     expect(creates.length).toBeGreaterThan(0);
     creates.forEach((sql) => expect(sql).toMatch(/IF NOT EXISTS/i));
   });
+
+  test('remove a coluna cpf, de forma idempotente', async () => {
+    // O CPF era coletado sem finalidade (LGPD art. 6, III — issue #8).
+    // DROP COLUMN apaga tambem os CPFs ja gravados; IF EXISTS deixa a
+    // instrucao inofensiva nas subidas seguintes.
+    await initDB();
+    const sqls = mockQuery.mock.calls.map((c) => c[0]);
+
+    expect(sqls).toContain('ALTER TABLE users DROP COLUMN IF EXISTS cpf');
+    // E a tabela de usuarios nao nasce mais com a coluna em bancos novos.
+    const criaUsers = sqls.find((s) => /CREATE TABLE IF NOT EXISTS users/.test(s));
+    expect(criaUsers).not.toMatch(/\bcpf\b/);
+  });
 });

@@ -84,7 +84,7 @@ describe('POST /auth/register', () => {
 
     const r = await request(app).post('/auth/register').send({
       email: 'Eduardo@iHome.com', password: 'senha-valida-123',
-      full_name: 'Eduardo Fritz', cpf: '123.456.789-00', phone: '(47) 99999-8888',
+      full_name: 'Eduardo Fritz', phone: '(47) 99999-8888',
     });
 
     expect(r.status).toBe(201);
@@ -95,18 +95,47 @@ describe('POST /auth/register', () => {
     expect(JSON.stringify(r.body)).not.toContain('password_hash');
   });
 
-  test('grava apenas os digitos de CPF e telefone', async () => {
+  test('grava apenas os digitos do telefone', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
 
     await request(app).post('/auth/register').send({
-      email: 'a@b.com', password: 'senha-valida-123',
-      cpf: '123.456.789-00', phone: '(47) 99999-8888',
+      email: 'a@b.com', password: 'senha-valida-123', phone: '(47) 99999-8888',
     });
 
     const insert = acharQuery(/INSERT INTO users/i);
-    expect(insert[1]).toContain('12345678900');
     expect(insert[1]).toContain('47999998888');
+  });
+
+  test('CPF enviado e IGNORADO: nao vai para o banco', async () => {
+    // O CPF era coletado sem finalidade (LGPD art. 6, III — issue #8). Um
+    // cliente antigo, ainda com o campo no formulario, nao pode fazer o dado
+    // voltar a ser gravado: nem a coluna aparece no INSERT, nem o valor.
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
+
+    const r = await request(app).post('/auth/register').send({
+      email: 'a@b.com', password: 'senha-valida-123', cpf: '123.456.789-00',
+    });
+
+    expect(r.status).toBe(201);
+    const insert = acharQuery(/INSERT INTO users/i);
+    expect(insert[0]).not.toMatch(/cpf/i);
+    expect(JSON.stringify(insert[1])).not.toContain('12345678900');
+    expect(JSON.stringify(insert[1])).not.toContain('123.456.789-00');
+  });
+
+  test('duas contas com o mesmo CPF deixam de ser um problema: o CPF nao existe', async () => {
+    // Era o bug relatado na issue #8. Em vez de bloquear o duplicado, o dado
+    // saiu do sistema — e com ele, a possibilidade de duplicar.
+    for (const email of ['um@b.com', 'dois@b.com']) {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+      mockQuery.mockResolvedValueOnce({ rows: [usuarioFake({ email })], rowCount: 1 });
+      const r = await request(app).post('/auth/register')
+        .send({ email, password: 'senha-valida-123', cpf: '111.111.111-11' });
+      expect(r.status).toBe(201);
+    }
+    expect(mockQuery.mock.calls.some((c) => /cpf/i.test(c[0]))).toBe(false);
   });
 
   test('a senha nunca vai para o banco em texto puro', async () => {
@@ -633,7 +662,8 @@ describe('auth.service — funcoes puras', () => {
   test('usuarioPublico remove o hash da senha', () => {
     const publico = authService.usuarioPublico(usuarioFake());
     expect(publico).not.toHaveProperty('password_hash');
-    expect(publico).not.toHaveProperty('cpf'); // CPF tambem nao volta para o cliente
+    // Mesmo que uma linha antiga ainda tivesse o CPF, ele nao atravessa a API.
+    expect(authService.usuarioPublico(usuarioFake({ cpf: '12345678900' }))).not.toHaveProperty('cpf');
     expect(publico.email).toBe('eduardo@ihome.com');
   });
 

@@ -49,7 +49,11 @@ function respostaDeSessao(user, accessToken, refreshToken) {
  */
 router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
-  const { password, full_name: fullName, cpf, phone } = req.body;
+  // Sem CPF, de propósito. O iHome pedia e gravava o CPF e não o usava em
+  // lugar nenhum — dado pessoal sem finalidade, o que a LGPD proíbe (art.
+  // 6º, III, princípio da necessidade). Se alguém ainda mandar o campo, ele
+  // é simplesmente ignorado. Apontado pelo @pdrollucas na issue #8.
+  const { password, full_name: fullName, phone } = req.body;
 
   if (!email || !isValidEmail(email)) {
     return res.status(400).json({ error: 'E-mail inválido.' });
@@ -64,14 +68,13 @@ router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) =
 
   const passwordHash = await auth.hashPassword(password);
   const criado = await pool.query(
-    `INSERT INTO users (email, password_hash, full_name, cpf, phone)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    `INSERT INTO users (email, password_hash, full_name, phone)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
     [
       email,
       passwordHash,
       fullName || null,
       // Guardamos só os dígitos: a máscara é responsabilidade da interface.
-      cpf ? String(cpf).replace(/\D/g, '') : null,
       phone ? String(phone).replace(/\D/g, '') : null,
     ]
   );
