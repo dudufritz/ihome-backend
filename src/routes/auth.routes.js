@@ -16,6 +16,7 @@ const { authMiddleware } = require('../middleware/auth');
 const { limitadorAuth } = require('../middleware/security');
 const { sendPasswordResetEmail, sendVerificationEmail } = require('../services/mail.service');
 const auth = require('../services/auth.service');
+const { excluirConta } = require('../services/account.service');
 
 const router = express.Router();
 
@@ -48,7 +49,11 @@ function respostaDeSessao(user, accessToken, refreshToken) {
  */
 router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
-  const { password, full_name: fullName, cpf, phone } = req.body;
+  // Sem CPF, de propósito. O iHome pedia e gravava o CPF e não o usava em
+  // lugar nenhum — dado pessoal sem finalidade, o que a LGPD proíbe (art.
+  // 6º, III, princípio da necessidade). Se alguém ainda mandar o campo, ele
+  // é simplesmente ignorado. Apontado pelo @pdrollucas na issue #8.
+  const { password, full_name: fullName, phone } = req.body;
 
   if (!email || !isValidEmail(email)) {
     return res.status(400).json({ error: 'E-mail inválido.' });
@@ -63,14 +68,13 @@ router.post('/auth/register', limiteCredenciais, asyncHandler(async (req, res) =
 
   const passwordHash = await auth.hashPassword(password);
   const criado = await pool.query(
-    `INSERT INTO users (email, password_hash, full_name, cpf, phone)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    `INSERT INTO users (email, password_hash, full_name, phone)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
     [
       email,
       passwordHash,
       fullName || null,
       // Guardamos só os dígitos: a máscara é responsabilidade da interface.
-      cpf ? String(cpf).replace(/\D/g, '') : null,
       phone ? String(phone).replace(/\D/g, '') : null,
     ]
   );
@@ -207,6 +211,31 @@ router.get('/auth/me', authMiddleware, asyncHandler(async (req, res) => {
   const user = await auth.buscarPorEmail(req.user.email);
   if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
   res.json({ user: auth.usuarioPublico(user) });
+}));
+
+/**
+ * DELETE /auth/me — exclui a conta de forma definitiva.
+ *
+ * POR QUE PEDE A SENHA, SE A PESSOA JÁ ESTÁ LOGADA
+ * O token prova que a sessão é válida, não que quem está na frente da tela é
+ * o dono. Num computador compartilhado ou num celular desbloqueado esquecido
+ * na mesa, qualquer um com a sessão aberta poderia apagar a conta de outro —
+ * e não há como desfazer. A senha é a confirmação de que é a própria pessoa.
+ *
+ * Por isso também o `limiteCredenciais`: a rota verifica senha, então
+ * precisa da mesma barreira contra força bruta que o login tem.
+ */
+router.delete('/auth/me', authMiddleware, limiteCredenciais, asyncHandler(async (req, res) => {
+  const user = await auth.buscarPorEmail(req.user.email);
+  if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+  const senhaConfere = await auth.verifyPassword(req.body?.password || '', user.password_hash);
+  if (!senhaConfere) {
+    return res.status(401).json({ error: 'Senha incorreta.' });
+  }
+
+  await excluirConta(user);
+  res.json({ success: true, message: 'Conta excluída. Todos os seus dados foram apagados.' });
 }));
 
 module.exports = router;

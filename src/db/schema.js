@@ -1,10 +1,14 @@
 /**
  * db/schema.js — Criação e evolução do esquema do banco.
  *
- * Estratégia: "migração na subida". Toda instrução usa IF NOT EXISTS, então
- * rodar initDB() várias vezes é seguro (é uma operação idempotente). Isso
- * dispensa uma ferramenta de migração externa num projeto deste porte, ao
- * custo de não haver rollback — aceitável porque só adicionamos estruturas.
+ * Estratégia: "migração na subida". Toda instrução usa IF NOT EXISTS (ou
+ * IF EXISTS, na remoção), então rodar initDB() várias vezes é seguro — é uma
+ * operação idempotente. Isso dispensa uma ferramenta de migração externa num
+ * projeto deste porte, ao custo de não haver rollback.
+ *
+ * A regra era "só adicionamos estruturas". Há UMA exceção, e ela é
+ * deliberada: a coluna `cpf`, removida no fim deste arquivo. Remover dado é
+ * irreversível — e aqui o irreversível é justamente o objetivo.
  */
 const { pool } = require('../config/database');
 
@@ -25,7 +29,6 @@ async function initDB() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       full_name TEXT,
-      cpf TEXT,
       phone TEXT,
       email_verified BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -210,6 +213,22 @@ async function initDB() {
   // então o índice composto atende filtro e ordenação numa única varredura.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_home  ON audit_log (home_owner_email, created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log (actor_email, created_at DESC)`);
+
+  // ── Remoção do CPF ──
+  //
+  // O cadastro pedia CPF, o banco gravava, e nenhuma parte do sistema lia.
+  // A LGPD (art. 6º, III) só permite coletar o mínimo necessário para a
+  // finalidade — e aqui não havia finalidade nenhuma. Dado guardado sem uso
+  // é só risco: se o banco vazasse, os CPFs iriam junto, e o CPF facilita
+  // fraude e roubo de identidade. Apontado pelo @pdrollucas na issue #8.
+  //
+  // DROP COLUMN, e não um UPDATE ... SET cpf = NULL: apagar a COLUNA apaga
+  // os CPFs que já estavam gravados E impede que um código futuro volte a
+  // gravar sem que alguém decida isso conscientemente numa migração nova.
+  //
+  // IF EXISTS mantém a idempotência: na primeira subida a coluna sai; nas
+  // seguintes, a instrução não faz nada.
+  await pool.query('ALTER TABLE users DROP COLUMN IF EXISTS cpf');
 
   console.log('✅ Banco de dados iniciado!');
 }

@@ -12,9 +12,14 @@ process.env.VAPID_PRIVATE_KEY = '';
 process.env.BCRYPT_ROUNDS = '4';
 
 const mockQuery = jest.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+// A exclusão de conta usa transação, que pede uma conexão dedicada com
+// pool.connect(). O cliente devolvido compartilha o mesmo mockQuery, então
+// as instruções da transação aparecem na mesma lista que as outras.
+const mockRelease = jest.fn();
 jest.mock('pg', () => {
   const Pool = jest.fn().mockImplementation(() => ({
     query: mockQuery,
+    connect: jest.fn().mockResolvedValue({ query: mockQuery, release: mockRelease }),
     on: jest.fn(),
     end: jest.fn().mockResolvedValue(undefined),
   }));
@@ -79,7 +84,7 @@ describe('POST /auth/register', () => {
 
     const r = await request(app).post('/auth/register').send({
       email: 'Eduardo@iHome.com', password: 'senha-valida-123',
-      full_name: 'Eduardo Fritz', cpf: '123.456.789-00', phone: '(47) 99999-8888',
+      full_name: 'Eduardo Fritz', phone: '(47) 99999-8888',
     });
 
     expect(r.status).toBe(201);
@@ -90,18 +95,47 @@ describe('POST /auth/register', () => {
     expect(JSON.stringify(r.body)).not.toContain('password_hash');
   });
 
-  test('grava apenas os digitos de CPF e telefone', async () => {
+  test('grava apenas os digitos do telefone', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
 
     await request(app).post('/auth/register').send({
-      email: 'a@b.com', password: 'senha-valida-123',
-      cpf: '123.456.789-00', phone: '(47) 99999-8888',
+      email: 'a@b.com', password: 'senha-valida-123', phone: '(47) 99999-8888',
     });
 
     const insert = acharQuery(/INSERT INTO users/i);
-    expect(insert[1]).toContain('12345678900');
     expect(insert[1]).toContain('47999998888');
+  });
+
+  test('CPF enviado e IGNORADO: nao vai para o banco', async () => {
+    // O CPF era coletado sem finalidade (LGPD art. 6, III — issue #8). Um
+    // cliente antigo, ainda com o campo no formulario, nao pode fazer o dado
+    // voltar a ser gravado: nem a coluna aparece no INSERT, nem o valor.
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
+
+    const r = await request(app).post('/auth/register').send({
+      email: 'a@b.com', password: 'senha-valida-123', cpf: '123.456.789-00',
+    });
+
+    expect(r.status).toBe(201);
+    const insert = acharQuery(/INSERT INTO users/i);
+    expect(insert[0]).not.toMatch(/cpf/i);
+    expect(JSON.stringify(insert[1])).not.toContain('12345678900');
+    expect(JSON.stringify(insert[1])).not.toContain('123.456.789-00');
+  });
+
+  test('duas contas com o mesmo CPF deixam de ser um problema: o CPF nao existe', async () => {
+    // Era o bug relatado na issue #8. Em vez de bloquear o duplicado, o dado
+    // saiu do sistema — e com ele, a possibilidade de duplicar.
+    for (const email of ['um@b.com', 'dois@b.com']) {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+      mockQuery.mockResolvedValueOnce({ rows: [usuarioFake({ email })], rowCount: 1 });
+      const r = await request(app).post('/auth/register')
+        .send({ email, password: 'senha-valida-123', cpf: '111.111.111-11' });
+      expect(r.status).toBe(201);
+    }
+    expect(mockQuery.mock.calls.some((c) => /cpf/i.test(c[0]))).toBe(false);
   });
 
   test('a senha nunca vai para o banco em texto puro', async () => {
@@ -438,6 +472,158 @@ describe('GET /auth/me', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// EXCLUSAO DE CONTA
+// ═══════════════════════════════════════════════════════════════
+describe('DELETE /auth/me — excluir conta', () => {
+  const tokenDe = (email = 'eduardo@ihome.com') => jwt.sign(
+    { sub: '1', email }, process.env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '15m' }
+  );
+
+  /** Envia o pedido de exclusao ja com a busca do usuario mockada. */
+  async function excluir(senha, usuario = usuarioFake()) {
+    mockQuery.mockResolvedValueOnce({ rows: usuario ? [usuario] : [], rowCount: usuario ? 1 : 0 });
+    return request(app)
+      .delete('/auth/me')
+      .set('Authorization', `Bearer ${tokenDe()}`)
+      .send(senha === undefined ? {} : { password: senha });
+  }
+
+  /** Todas as instrucoes SQL executadas, na ordem. */
+  const sqls = () => mockQuery.mock.calls.map((c) => c[0].replace(/\s+/g, ' ').trim());
+
+  beforeEach(() => mockRelease.mockClear());
+
+  test('sem token retorna 401', async () => {
+    const r = await request(app).delete('/auth/me').send({ password: 'senha-valida-123' });
+    expect(r.status).toBe(401);
+  });
+
+  test('senha errada retorna 401 e NAO apaga nada', async () => {
+    // O token prova a sessao, nao a pessoa. Sem conferir a senha, quem
+    // achasse um celular desbloqueado apagaria a conta do dono.
+    const r = await excluir('senha-errada');
+
+    expect(r.status).toBe(401);
+    expect(r.body.error).toMatch(/[Ss]enha incorreta/);
+    expect(sqls().some((s) => /^DELETE/i.test(s))).toBe(false);
+    expect(sqls()).not.toContain('BEGIN');
+  });
+
+  test('sem senha no corpo retorna 401', async () => {
+    const r = await excluir(undefined);
+    expect(r.status).toBe(401);
+  });
+
+  test('conta que ja nao existe retorna 404', async () => {
+    const r = await excluir('senha-valida-123', null);
+    expect(r.status).toBe(404);
+  });
+
+  test('senha certa apaga a conta e responde 200', async () => {
+    const r = await excluir('senha-valida-123');
+    expect(r.status).toBe(200);
+    expect(r.body.success).toBe(true);
+  });
+
+  test('tudo acontece dentro de UMA transacao', async () => {
+    // Dez tabelas: se a exclusao parasse no meio, sobraria conta pela
+    // metade — por exemplo, credenciais Tuya de alguem que ja saiu.
+    await excluir('senha-valida-123');
+    const lista = sqls();
+
+    expect(lista).toContain('BEGIN');
+    expect(lista[lista.length - 1]).toBe('COMMIT');
+    expect(lista.indexOf('BEGIN')).toBeLessThan(lista.findIndex((s) => /DELETE FROM users/.test(s)));
+  });
+
+  test('apaga os dados de TODAS as tabelas ligadas pelo e-mail', async () => {
+    // So refresh_tokens e auth_tokens tem CASCADE. As outras ligam o usuario
+    // pelo e-mail, sem chave estrangeira — esquecer uma deixaria dado orfao.
+    await excluir('senha-valida-123');
+    const lista = sqls().join('\n');
+
+    [
+      'user_schedules', 'user_alerts', 'device_status_cache', 'user_devices',
+      'user_tuya_config', 'push_subscriptions', 'home_shares',
+    ].forEach((tabela) => {
+      expect(lista).toMatch(new RegExp(`DELETE FROM ${tabela}`));
+    });
+    expect(lista).toMatch(/DELETE FROM users WHERE id = \$1/);
+  });
+
+  test('toda instrucao filtra pelo e-mail de QUEM PEDIU, nunca de outro', async () => {
+    // O e-mail vem do JWT verificado, nao do corpo — o cliente nao escolhe
+    // qual conta apagar. Um campo "email" no corpo e simplesmente ignorado.
+    mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
+    await request(app)
+      .delete('/auth/me')
+      .set('Authorization', `Bearer ${tokenDe()}`)
+      .send({ password: 'senha-valida-123', email: 'vitima@ihome.com' });
+
+    const comEmail = mockQuery.mock.calls.filter((c) => /user_email|owner_email|actor_email/.test(c[0]));
+    expect(comEmail.length).toBeGreaterThan(0);
+    comEmail.forEach((c) => expect(c[1][0]).toBe('eduardo@ihome.com'));
+    expect(JSON.stringify(mockQuery.mock.calls)).not.toContain('vitima@ihome.com');
+  });
+
+  test('compartilhamentos saem nos DOIS sentidos', async () => {
+    // As casas que ela abriu para outros E as casas onde ela era convidada.
+    await excluir('senha-valida-123');
+    const share = sqls().find((s) => /DELETE FROM home_shares/.test(s));
+    expect(share).toMatch(/owner_email = \$1 OR guest_email = \$1/);
+  });
+
+  test('auditoria da casa de OUTRA pessoa e anonimizada, nao apagada', async () => {
+    // O registro "alguem ligou a luz da sala as 20h" pertence ao historico do
+    // dono daquela casa. Sai o dado pessoal; o fato fica.
+    await excluir('senha-valida-123');
+
+    const anonimiza = mockQuery.mock.calls.find((c) => /UPDATE audit_log/.test(c[0]));
+    expect(anonimiza).toBeDefined();
+    expect(anonimiza[0]).toMatch(/ip_address = NULL/);
+    expect(anonimiza[0]).toMatch(/user_agent = NULL/);
+    expect(anonimiza[1]).toEqual(['eduardo@ihome.com', 'conta-excluida']);
+
+    // E a auditoria da PROPRIA casa e apagada.
+    expect(sqls().join('\n')).toMatch(/DELETE FROM audit_log WHERE home_owner_email = \$1/);
+  });
+
+  test('falha no meio desfaz TUDO (ROLLBACK) e responde erro', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 }); // busca
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });              // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });              // schedules
+    mockQuery.mockRejectedValueOnce(new Error('conexao caiu'));             // alerts
+
+    const r = await request(app)
+      .delete('/auth/me')
+      .set('Authorization', `Bearer ${tokenDe()}`)
+      .send({ password: 'senha-valida-123' });
+
+    expect(r.status).toBe(500);
+    expect(sqls()).toContain('ROLLBACK');
+    expect(sqls()).not.toContain('COMMIT');
+    // A conta continua de pe: o DELETE de users nem chegou a rodar.
+    expect(sqls().some((s) => /DELETE FROM users/.test(s))).toBe(false);
+  });
+
+  test('a conexao volta ao pool tanto no sucesso quanto na falha', async () => {
+    // Esquecer o release vazaria uma das 10 conexoes a cada falha, ate o app
+    // parar de responder.
+    await excluir('senha-valida-123');
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+
+    mockRelease.mockClear();
+    mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
+    mockQuery.mockRejectedValueOnce(new Error('BEGIN falhou'));
+    await request(app)
+      .delete('/auth/me')
+      .set('Authorization', `Bearer ${tokenDe()}`)
+      .send({ password: 'senha-valida-123' });
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // UNIDADE — auth.service
 // ═══════════════════════════════════════════════════════════════
 describe('auth.service — funcoes puras', () => {
@@ -476,7 +662,8 @@ describe('auth.service — funcoes puras', () => {
   test('usuarioPublico remove o hash da senha', () => {
     const publico = authService.usuarioPublico(usuarioFake());
     expect(publico).not.toHaveProperty('password_hash');
-    expect(publico).not.toHaveProperty('cpf'); // CPF tambem nao volta para o cliente
+    // Mesmo que uma linha antiga ainda tivesse o CPF, ele nao atravessa a API.
+    expect(authService.usuarioPublico(usuarioFake({ cpf: '12345678900' }))).not.toHaveProperty('cpf');
     expect(publico.email).toBe('eduardo@ihome.com');
   });
 
