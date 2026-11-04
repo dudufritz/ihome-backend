@@ -16,6 +16,7 @@ const { authMiddleware } = require('../middleware/auth');
 const { limitadorAuth } = require('../middleware/security');
 const { sendPasswordResetEmail, sendVerificationEmail } = require('../services/mail.service');
 const auth = require('../services/auth.service');
+const { excluirConta } = require('../services/account.service');
 
 const router = express.Router();
 
@@ -207,6 +208,31 @@ router.get('/auth/me', authMiddleware, asyncHandler(async (req, res) => {
   const user = await auth.buscarPorEmail(req.user.email);
   if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
   res.json({ user: auth.usuarioPublico(user) });
+}));
+
+/**
+ * DELETE /auth/me — exclui a conta de forma definitiva.
+ *
+ * POR QUE PEDE A SENHA, SE A PESSOA JÁ ESTÁ LOGADA
+ * O token prova que a sessão é válida, não que quem está na frente da tela é
+ * o dono. Num computador compartilhado ou num celular desbloqueado esquecido
+ * na mesa, qualquer um com a sessão aberta poderia apagar a conta de outro —
+ * e não há como desfazer. A senha é a confirmação de que é a própria pessoa.
+ *
+ * Por isso também o `limiteCredenciais`: a rota verifica senha, então
+ * precisa da mesma barreira contra força bruta que o login tem.
+ */
+router.delete('/auth/me', authMiddleware, limiteCredenciais, asyncHandler(async (req, res) => {
+  const user = await auth.buscarPorEmail(req.user.email);
+  if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+  const senhaConfere = await auth.verifyPassword(req.body?.password || '', user.password_hash);
+  if (!senhaConfere) {
+    return res.status(401).json({ error: 'Senha incorreta.' });
+  }
+
+  await excluirConta(user);
+  res.json({ success: true, message: 'Conta excluída. Todos os seus dados foram apagados.' });
 }));
 
 module.exports = router;
