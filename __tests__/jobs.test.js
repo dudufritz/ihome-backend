@@ -309,4 +309,12 @@ describe('db/schema — initDB', () => {
     const criaUsers = sqls.find((s) => /CREATE TABLE IF NOT EXISTS users/.test(s));
     expect(criaUsers).not.toMatch(/\bcpf\b/);
   });
+
+  test('remove a coluna phone pelo mesmo motivo do cpf', async () => {
+    await initDB();
+    const sqls = mockQuery.mock.calls.map((c) => c[0]);
+    expect(sqls).toContain('ALTER TABLE users DROP COLUMN IF EXISTS phone');
+    const criaUsers = sqls.find((s) => /CREATE TABLE IF NOT EXISTS users/.test(s));
+    expect(criaUsers).not.toMatch(/\bphone\b/);
+  });
 });

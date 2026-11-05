@@ -84,7 +84,7 @@ describe('POST /auth/register', () => {
 
     const r = await request(app).post('/auth/register').send({
       email: 'Eduardo@iHome.com', password: 'senha-valida-123',
-      full_name: 'Eduardo Fritz', phone: '(47) 99999-8888',
+      full_name: 'Eduardo Fritz',
     });
 
     expect(r.status).toBe(201);
@@ -95,16 +95,20 @@ describe('POST /auth/register', () => {
     expect(JSON.stringify(r.body)).not.toContain('password_hash');
   });
 
-  test('grava apenas os digitos do telefone', async () => {
+  test('telefone enviado e IGNORADO: nao vai para o banco', async () => {
+    // Mesmo caso do CPF: era exigido no cadastro e nada no sistema usava
+    // (LGPD art. 6, III). Um cliente antigo ainda com o campo nao o traz de volta.
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     mockQuery.mockResolvedValueOnce({ rows: [usuarioFake()], rowCount: 1 });
 
-    await request(app).post('/auth/register').send({
+    const r = await request(app).post('/auth/register').send({
       email: 'a@b.com', password: 'senha-valida-123', phone: '(47) 99999-8888',
     });
 
+    expect(r.status).toBe(201);
     const insert = acharQuery(/INSERT INTO users/i);
-    expect(insert[1]).toContain('47999998888');
+    expect(insert[0]).not.toMatch(/phone/i);
+    expect(JSON.stringify(insert[1])).not.toContain('47999998888');
   });
 
   test('CPF enviado e IGNORADO: nao vai para o banco', async () => {
@@ -468,6 +472,81 @@ describe('GET /auth/me', () => {
     const token = jwt.sign({ sub: '1', email: 'x@y.com' }, 'segredo-errado');
     const r = await request(app).get('/auth/me').set('Authorization', `Bearer ${token}`);
     expect(r.status).toBe(401);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORTACAO DE DADOS (LGPD art. 18, II e V)
+// ═══════════════════════════════════════════════════════════════
+describe('GET /auth/me/dados — baixar meus dados', () => {
+  const token = () => jwt.sign(
+    { sub: '1', email: 'eduardo@ihome.com' }, process.env.JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '15m' }
+  );
+
+  /** Busca do usuario + as dez consultas do exportarDados, todas vazias. */
+  async function baixar(usuario = usuarioFake()) {
+    mockQuery.mockResolvedValueOnce({ rows: usuario ? [usuario] : [], rowCount: usuario ? 1 : 0 });
+    return request(app).get('/auth/me/dados').set('Authorization', `Bearer ${token()}`);
+  }
+
+  test('sem token retorna 401', async () => {
+    const r = await request(app).get('/auth/me/dados');
+    expect(r.status).toBe(401);
+  });
+
+  test('responde como download de arquivo JSON', async () => {
+    // Content-Disposition: attachment e o que faz o navegador baixar em vez
+    // de mostrar o JSON na tela.
+    const r = await baixar();
+    expect(r.status).toBe(200);
+    expect(r.headers['content-disposition']).toMatch(/attachment; filename="ihome-meus-dados-\d{4}-\d{2}-\d{2}\.json"/);
+  });
+
+  test('traz as secoes que a LGPD manda dar acesso', async () => {
+    const r = await baixar();
+    expect(r.body.conta.email).toBe('eduardo@ihome.com');
+    ['dispositivos', 'rotinas', 'alertas', 'compartilhamentos', 'notificacoes_push', 'auditoria', 'sessoes']
+      .forEach((secao) => expect(r.body).toHaveProperty(secao));
+  });
+
+  test('NUNCA inclui senha, segredo da Tuya, chaves de push ou token de convite', async () => {
+    // Se o arquivo vazar, nao pode virar uma chave da conta ou da casa.
+    const r = await baixar();
+    const tudo = JSON.stringify(r.body);
+    expect(tudo).not.toMatch(/password_hash|\$2[aby]\$/);
+
+    const sqls = mockQuery.mock.calls.map((c) => c[0]).join('\n');
+    expect(sqls).not.toMatch(/tuya_secret/);
+    expect(sqls).not.toMatch(/invite_token/);
+    expect(sqls).not.toMatch(/token_hash/);
+    // Do push sai so o servidor (split_part), nunca a subscription inteira.
+    expect(sqls).not.toMatch(/SELECT[^;]*\bsubscription\b\s*(,|FROM)/);
+  });
+
+  test('nenhuma consulta usa SELECT * — coluna nova nao entra sozinha no arquivo', async () => {
+    await baixar();
+    const consultasDoExport = mockQuery.mock.calls.slice(1).map((c) => c[0]);
+    consultasDoExport.forEach((sql) => expect(sql).not.toMatch(/SELECT \*/i));
+  });
+
+  test('toda consulta filtra pela pessoa do token', async () => {
+    await baixar();
+    mockQuery.mock.calls.slice(1).forEach((c) => {
+      expect([ 'eduardo@ihome.com', 1 ]).toContain(c[1][0]);
+    });
+  });
+
+  test('auditoria separa a propria casa das acoes em casas de outros', async () => {
+    const r = await baixar();
+    expect(r.body.auditoria).toHaveProperty('na_sua_casa');
+    expect(r.body.auditoria).toHaveProperty('suas_acoes_em_outras_casas');
+    expect(r.body.auditoria.retencao_dias).toBe(90);
+  });
+
+  test('conta que ja nao existe retorna 404', async () => {
+    const r = await baixar(null);
+    expect(r.status).toBe(404);
   });
 });
 
