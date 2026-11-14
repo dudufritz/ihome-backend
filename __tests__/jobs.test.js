@@ -179,6 +179,50 @@ describe('monitor.job — deteccao de transicao', () => {
     mockQuery.mockRejectedValueOnce(new Error('banco fora do ar'));
     await expect(monitorDevices()).resolves.toBeUndefined();
   });
+
+  // ── LGPD: o que vai para o log ──
+  // Os logs do App Service ficam guardados por 3 dias, e a Politica de
+  // Privacidade nao os declara. Por isso o erro identifica a pessoa pelo ID,
+  // que basta para o diagnostico, e nunca pelo e-mail.
+
+  test('Tuya fora do ar: o log mostra o ID, nunca o e-mail', async () => {
+    const erro = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockQuery.mockResolvedValueOnce({ rows: [{ user_email: 'dono@ihome.com', user_id: 42 }], rowCount: 1 });
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tuya_access_id: 'acc', tuya_secret: 'sec', tuya_base_url: 'https://openapi.tuyaus.com' }], rowCount: 1,
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ tuya_id: 'd1', name: 'Lampada' }], rowCount: 1 });
+    axios.get.mockResolvedValueOnce({ data: { success: true, result: { access_token: 'tok', expire_time: 7200 } } });
+    axios.mockRejectedValueOnce(new Error('quota exhausted'));
+
+    await monitorDevices();
+
+    const logado = erro.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logado).toContain('usuário #42');
+    expect(logado).not.toContain('dono@ihome.com');
+    erro.mockRestore();
+  });
+
+  test('erro geral por usuario tambem nao expoe o e-mail', async () => {
+    const erro = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockQuery.mockResolvedValueOnce({ rows: [{ user_email: 'a@x.com', user_id: 7 }], rowCount: 1 });
+    mockQuery.mockRejectedValueOnce(new Error('credencial invalida'));
+
+    await monitorDevices();
+
+    const logado = erro.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logado).toContain('usuário #7');
+    expect(logado).not.toContain('a@x.com');
+    erro.mockRestore();
+  });
+
+  test('a consulta inicial traz o ID junto, sem deixar de monitorar quem nao tem linha em users', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    await monitorDevices();
+    const sql = mockQuery.mock.calls[0][0];
+    expect(sql).toMatch(/u\.id AS user_id/);
+    expect(sql).toMatch(/LEFT JOIN users/);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

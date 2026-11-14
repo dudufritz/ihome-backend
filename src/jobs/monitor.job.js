@@ -37,11 +37,25 @@ async function monitorDevices() {
   try {
     // Só usuários que têm dispositivos E credenciais: o JOIN elimina quem
     // cadastrou aparelhos mas nunca configurou a Tuya.
+    //
+    // O `u.id` vem junto só para os logs de erro abaixo. LEFT JOIN, e não
+    // JOIN, para não deixar de monitorar alguém caso a linha em `users` falte.
     const usersResult = await pool.query(
-      'SELECT DISTINCT ud.user_email FROM user_devices ud JOIN user_tuya_config utc ON ud.user_email = utc.user_email'
+      `SELECT DISTINCT ud.user_email, u.id AS user_id
+         FROM user_devices ud
+         JOIN user_tuya_config utc ON ud.user_email = utc.user_email
+         LEFT JOIN users u ON u.email = ud.user_email`
     );
 
-    for (const { user_email } of usersResult.rows) {
+    for (const { user_email, user_id } of usersResult.rows) {
+      // QUEM APARECE NO LOG: o ID, nunca o e-mail.
+      //
+      // Os logs do App Service ficam guardados por 3 dias. Gravar o e-mail
+      // ali seria guardar dado pessoal num lugar que a Política de
+      // Privacidade não declara (LGPD art. 6º, III e VI). O ID basta para o
+      // diagnóstico — com ele se acha a conta no banco — e sozinho não
+      // identifica ninguém para quem lê o log.
+      const quem = `usuário #${user_id ?? '?'}`;
       // try por usuário: credencial inválida de um não interrompe os demais.
       try {
         const config = await getUserTuya(user_email);
@@ -68,7 +82,7 @@ async function monitorDevices() {
           // recebia vinte notificações falsas e perdia a confiança nas
           // verdadeiras. Sem resposta da Tuya não dá para afirmar nada sobre
           // a casa; o certo é não afirmar.
-          console.error(`Monitor: Tuya indisponível para ${user_email}:`, e.message);
+          console.error(`Monitor: Tuya indisponível para ${quem}:`, e.message);
           continue;
         }
 
@@ -102,7 +116,7 @@ async function monitorDevices() {
           }
         }
       } catch (e) {
-        console.error(`Monitor erro para ${user_email}:`, e.message);
+        console.error(`Monitor erro para ${quem}:`, e.message);
       }
     }
   } catch (err) {
